@@ -1,0 +1,10 @@
+.env
+.rcloud_cookies.json
+db/golf_analytics.duckdb
+backups/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+node_modules/
