@@ -4,10 +4,16 @@ Writes parsed, deduplicated session and shot records into DuckDB.
 
 from __future__ import annotations
 
+import duckdb
+from pathlib import Path
+
 from ingester.parse import ParsedSession, Shot
 from ingester.deduplicate import filter_new_shots, session_exists
 from ingester.impute import impute_club_speeds, compute_stopping_power
+from api.compute import recompute_adjustments
 from db import get_connection
+
+_DB_PATH = Path(__file__).parent.parent / "db" / "golf_analytics.duckdb"
 
 
 def load_session(session: ParsedSession) -> int:
@@ -56,5 +62,10 @@ def load_session(session: ParsedSession) -> int:
     if new_shots:
         impute_club_speeds()
         compute_stopping_power(shot_ids=[s.shot_id for s in new_shots])
+        adj_conn = duckdb.connect(str(_DB_PATH))
+        try:
+            recompute_adjustments(adj_conn)
+        finally:
+            adj_conn.close()
 
     return len(new_shots)

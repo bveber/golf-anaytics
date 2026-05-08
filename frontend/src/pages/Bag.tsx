@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
-import type { ClubStats, ClubOption } from '../api'
+import type { ClubStats, ClubOption, UserSettings } from '../api'
 import { useBag, bagKey } from '../BagContext'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 function n(v: number | null | undefined, dec = 1) {
   return v == null ? '—' : v.toFixed(dec)
@@ -24,6 +27,12 @@ export default function Bag() {
   const [rows, setRows] = useState<BagRow[]>([])
   const [error, setError] = useState<string | null>(null)
   const { disabledClubs, toggleClub } = useBag()
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   useEffect(() => {
     Promise.all([
@@ -57,7 +66,10 @@ export default function Bag() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-white mb-1">My Bag</h1>
+      <div className="flex items-center gap-3 mb-1">
+        <h1 className="text-2xl font-bold text-white">My Bag</h1>
+        <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
+      </div>
       <p className="text-slate-400 text-sm mb-6">
         Full effort averages per club (highest speed bucket). All clubs found in your sessions are listed automatically.
         Toggle clubs off to hide them across all pages.
@@ -74,8 +86,8 @@ export default function Bag() {
               <th className="px-4 py-3 text-right">Carry</th>
               <th className="px-4 py-3 text-right">±Std</th>
               <th className="px-4 py-3 text-right">Total</th>
-              <th className="px-4 py-3 text-right">Ball Spd</th>
-              <th className="px-4 py-3 text-right">Club Spd</th>
+              <th className="px-4 py-3 text-right">{adjusted ? '~Ball Spd' : 'Ball Spd'}</th>
+              <th className="px-4 py-3 text-right">{adjusted ? '~Club Spd' : 'Club Spd'}</th>
               <th className="px-4 py-3 text-right">Smash</th>
               <th className="px-4 py-3 text-right">Launch</th>
               <th className="px-4 py-3 text-right">Spin</th>
@@ -108,8 +120,8 @@ export default function Bag() {
                   <td className="px-4 py-2.5 text-right">{n(s?.carry_mean)} yds</td>
                   <td className="px-4 py-2.5 text-right text-slate-400">±{n(s?.carry_std)}</td>
                   <td className="px-4 py-2.5 text-right">{n(s?.total_mean)} yds</td>
-                  <td className="px-4 py-2.5 text-right">{n(s?.ball_speed_mean)} mph</td>
-                  <td className="px-4 py-2.5 text-right">{n(s?.club_speed_mean)} mph</td>
+                  <td className="px-4 py-2.5 text-right">{n(adjusted ? (s?.ball_speed_mean_adj ?? s?.ball_speed_mean) : s?.ball_speed_mean)} mph</td>
+                  <td className="px-4 py-2.5 text-right">{n(adjusted ? (s?.club_speed_mean_adj ?? s?.club_speed_mean) : s?.club_speed_mean)} mph</td>
                   <td className="px-4 py-2.5 text-right">{n(s?.smash_factor_mean, 2)}</td>
                   <td className="px-4 py-2.5 text-right">{n(s?.launch_angle_mean)}°</td>
                   <td className="px-4 py-2.5 text-right">{n(s?.spin_rate_mean, 0)} rpm</td>
@@ -141,6 +153,7 @@ export default function Bag() {
           {activeCount} of {rows.length} clubs active — inactive clubs are hidden on all other pages
         </div>
       </div>
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

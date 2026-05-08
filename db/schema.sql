@@ -39,16 +39,21 @@ CREATE TABLE IF NOT EXISTS shots (
 );
 
 CREATE TABLE IF NOT EXISTS swing_effort_thresholds (
-    club_type     TEXT PRIMARY KEY,
-    anchor_speed  DOUBLE NOT NULL,  -- max club_speed (mph) = top of 100-80 bucket
-    min_speed     DOUBLE NOT NULL,  -- min club_speed (mph) = bottom of 20-0 bucket
-    full_speed    DOUBLE NOT NULL,  -- lower bound for '100-80' (80% of range)
-    pct75_speed   DOUBLE NOT NULL,  -- lower bound for '80-60'  (60% of range)
-    pct60_speed   DOUBLE NOT NULL,  -- lower bound for '60-40'  (40% of range)
-    pct50_speed   DOUBLE NOT NULL,  -- lower bound for '40-20'  (20% of range)
-    shot_count    INTEGER NOT NULL,
-    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    club_type    TEXT NOT NULL,
+    bucket_index INTEGER NOT NULL,
+    lower_bound  DOUBLE NOT NULL,
+    upper_bound  DOUBLE,
+    label        TEXT NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (club_type, bucket_index)
 );
+
+CREATE TABLE IF NOT EXISTS user_settings (
+    id            INTEGER PRIMARY KEY DEFAULT 1,
+    elevation_ft  DOUBLE NOT NULL DEFAULT 900.0,
+    temperature_f DOUBLE NOT NULL DEFAULT 70.0
+);
+INSERT OR IGNORE INTO user_settings (id) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS combine_sessions (
     combine_id        TEXT PRIMARY KEY,

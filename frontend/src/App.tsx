@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import SessionBrowser from './pages/SessionBrowser'
 import SessionSummary from './pages/SessionSummary'
@@ -11,8 +12,10 @@ import Compare from './pages/Compare'
 import SessionClubs from './pages/SessionClubs'
 import Bag from './pages/Bag'
 import { BagProvider } from './BagContext'
+import SettingsModal from './components/SettingsModal'
 
 function Nav() {
+  const [showSettings, setShowSettings] = useState(false)
   const cls = ({ isActive }: { isActive: boolean }) =>
     `px-4 py-2 rounded text-sm font-medium transition-colors ${
       isActive ? 'bg-green-700 text-white' : 'text-slate-400 hover:text-white'
@@ -28,6 +31,13 @@ function Nav() {
       <NavLink to="/rounds" className={cls}>Rounds</NavLink>
       <NavLink to="/compare" className={cls}>Compare</NavLink>
       <NavLink to="/bag" className={cls}>Bag</NavLink>
+      <button onClick={() => setShowSettings(true)} className="ml-auto text-slate-400 hover:text-white text-lg px-2" title="Conditions">⚙</button>
+      {showSettings && (
+        <SettingsModal
+          onClose={() => setShowSettings(false)}
+          onSaved={() => { setShowSettings(false); window.location.reload() }}
+        />
+      )}
     </nav>
   )
 }

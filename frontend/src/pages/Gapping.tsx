@@ -4,8 +4,11 @@ import {
   ResponsiveContainer, ComposedChart, Line,
 } from 'recharts'
 import { api } from '../api'
-import type { ClubStats, MatrixRow, Shot } from '../api'
+import type { ClubStats, MatrixRow, Shot, UserSettings } from '../api'
 import { useBag } from '../BagContext'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 function n(v: number | null | undefined, dec = 1) {
   return v == null ? '—' : v.toFixed(dec)
@@ -96,6 +99,11 @@ function aggregateByClubType(rows: ClubStats[]): ClubStats[] {
       smash_factor_mean: wavg('smash_factor_mean'), side_carry_mean: wavg('side_carry_mean'),
       side_carry_std: wavg('side_carry_std'), launch_angle_mean: wavg('launch_angle_mean'),
       club_speed_mean: wavg('club_speed_mean'),
+      spin_axis_mean: wavg('spin_axis_mean'), club_path_mean: wavg('club_path_mean'),
+      attack_angle_mean: wavg('attack_angle_mean'), launch_direction_mean: wavg('launch_direction_mean'),
+      apex_mean: wavg('apex_mean'),
+      carry_mean_adj: wavg('carry_mean_adj'), total_mean_adj: wavg('total_mean_adj'),
+      ball_speed_mean_adj: wavg('ball_speed_mean_adj'), club_speed_mean_adj: wavg('club_speed_mean_adj'),
     }
   })
 }
@@ -155,11 +163,10 @@ const RANK_BADGES: { label: string; bg: string; text: string }[] = [
   { label: '3rd', bg: 'bg-amber-700', text: 'text-white' },
 ]
 
-function ShotSimulator({ stats, matrix, allBuckets, totalBuckets }: {
+function ShotSimulator({ stats, matrix, allBuckets }: {
   stats: ClubStats[]
   matrix: MatrixRow[]
   allBuckets: string[]
-  totalBuckets: number
 }) {
   const [carryInput, setCarryInput] = useState('')
   const [totalInput, setTotalInput] = useState('')
@@ -303,12 +310,19 @@ export default function Gapping() {
   const [allStats, setAllStats] = useState<ClubStats[]>([])
   const [allMatrix, setAllMatrix] = useState<MatrixRow[]>([])
   const [allShots, setAllShots] = useState<Record<string, Shot[]>>({})
+  const [showRegression, setShowRegression] = useState(false)
   const [hoveredClub, setHoveredClub] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sessionLimit, setSessionLimit] = useState<SessionLimit>('all')
   const [dateFrom, setDateFrom] = useState('')
   const [dateTo, setDateTo] = useState('')
   const { disabledClubs, isActive } = useBag()
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   useEffect(() => {
     const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
@@ -331,6 +345,7 @@ export default function Gapping() {
   }, [disabledClubs, sessionLimit, dateFrom, dateTo])
 
   useEffect(() => {
+    if (!showRegression) return  // don't fetch until user requests it
     const clubTypes = [...new Set(allStats.map((c) => c.club_type).filter(Boolean))] as string[]
     if (clubTypes.length === 0) return
     const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
@@ -342,57 +357,83 @@ export default function Gapping() {
     Promise.all(
       clubTypes.map((ct) => api.shotsByClub(ct, Object.keys(extraParams).length ? extraParams : undefined).then((shots) => [ct, shots] as const))
     ).then((entries) => setAllShots(Object.fromEntries(entries)))
-  }, [allStats, disabledClubs, sessionLimit, dateFrom, dateTo])
+  }, [allStats, disabledClubs, sessionLimit, dateFrom, dateTo, showRegression])
 
-  const stats = aggregateByClubType(allStats.filter((c) => isActive(c.club_type ?? '', c.club)))
-  const matrix = allMatrix
-  const matrixByClub = Object.fromEntries(matrix.map((r) => [r.club_type, r.buckets]))
+  const stats = useMemo(
+    () => aggregateByClubType(allStats.filter((c) => isActive(c.club_type ?? '', c.club))),
+    [allStats, disabledClubs], // eslint-disable-line react-hooks/exhaustive-deps
+  )
+  const matrixByClub = useMemo(
+    () => Object.fromEntries(allMatrix.map((r) => [r.club_type, r.buckets])),
+    [allMatrix],
+  )
 
   // All bucket indices present in matrix data, sorted numerically
   const allBuckets = useMemo(() => {
     const keys = new Set<string>()
-    matrix.forEach((r) => Object.keys(r.buckets).filter((k) => k !== 'unknown').forEach((k) => keys.add(k)))
+    allMatrix.forEach((r) => Object.keys(r.buckets).filter((k) => k !== 'unknown').forEach((k) => keys.add(k)))
     return [...keys].sort((a, b) => parseInt(a) - parseInt(b))
-  }, [matrix])
+  }, [allMatrix])
   const totalBuckets = allBuckets.length
 
-  // For sorting/gapping: use full-effort (rank 1 = first in ascending sort) carry as the reference
-  const getRefCarry = (c: ClubStats) => {
-    const buckets = matrixByClub[c.club_type ?? ''] ?? {}
-    const topKey = allBuckets[0] // rank 1 = full effort
-    const b = topKey ? buckets[topKey] : null
-    return (b?.n ?? 0) >= MIN_BUCKET_N ? (b?.carry_mean ?? c.carry_mean) : c.carry_mean
-  }
+  const ascending = useMemo(() => {
+    const getRef = (c: ClubStats) => {
+      const buckets = matrixByClub[c.club_type ?? ''] ?? {}
+      const topKey = allBuckets[0]
+      const b = topKey ? buckets[topKey] : null
+      const fallback = adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean
+      return (b?.n ?? 0) >= MIN_BUCKET_N ? (b?.carry_mean ?? fallback) : fallback
+    }
+    return [...stats]
+      .filter((c) => c.carry_mean != null && c.club_type != null)
+      .sort((a, b) => (getRef(a) ?? 0) - (getRef(b) ?? 0))
+  }, [stats, matrixByClub, allBuckets, adjusted])
 
-  const ascending = [...stats]
-    .filter((c) => c.carry_mean != null && c.club_type != null)
-    .sort((a, b) => (getRefCarry(a) ?? 0) - (getRefCarry(b) ?? 0))
+  const descending = useMemo((): GapRow[] => {
+    const getRef = (c: ClubStats) => {
+      const buckets = matrixByClub[c.club_type ?? ''] ?? {}
+      const topKey = allBuckets[0]
+      const b = topKey ? buckets[topKey] : null
+      const fallback = adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean
+      return (b?.n ?? 0) >= MIN_BUCKET_N ? (b?.carry_mean ?? fallback) : fallback
+    }
+    return ascending
+      .slice()
+      .reverse()
+      .map((c, i, arr) => ({
+        ...c,
+        gapUp: i > 0 ? (getRef(arr[i - 1]) ?? 0) - (getRef(c) ?? 0) : null,
+      }))
+  }, [ascending, matrixByClub, allBuckets, adjusted])
 
-  const descending: GapRow[] = ascending
-    .slice()
-    .reverse()
-    .map((c, i, arr) => ({
-      ...c,
-      gapUp: i > 0 ? (getRefCarry(arr[i - 1]) ?? 0) - (getRefCarry(c) ?? 0) : null,
-    }))
-
-  const chartData: ChartDatum[] = ascending.map((c) => {
+  const chartData = useMemo((): ChartDatum[] => ascending.map((c) => {
     const buckets = matrixByClub[c.club_type ?? ''] ?? {}
     const validBuckets = Object.fromEntries(
       allBuckets.map((k) => [k, (buckets[k]?.n ?? 0) >= MIN_BUCKET_N ? buckets[k] : null])
     )
     const hasEffort = allBuckets.some((k) => validBuckets[k] != null)
+    const carryVal = adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean
+    const totalVal = adjusted ? (c.total_mean_adj ?? c.total_mean) : c.total_mean
+    // Scale effort-bucket carries proportionally when adjusted — matrix has no _adj columns
+    const adjFactor = adjusted && c.carry_mean != null && c.carry_mean > 0 && c.carry_mean_adj != null
+      ? c.carry_mean_adj / c.carry_mean
+      : 1.0
+    const totalAdjFactor = adjusted && c.total_mean != null && c.total_mean > 0 && c.total_mean_adj != null
+      ? c.total_mean_adj / c.total_mean
+      : 1.0
 
     const datum: ChartDatum = {
       club_type: c.club_type ?? '',
-      carry_mean: c.carry_mean,
-      total_mean: c.total_mean,
-      seg_all: hasEffort ? 0 : (c.carry_mean ?? 0),
+      carry_mean: carryVal,
+      total_mean: totalVal,
+      seg_all: hasEffort ? 0 : (carryVal ?? 0),
     }
 
     for (const k of allBuckets) {
-      datum[`carry_${k}`] = validBuckets[k]?.carry_mean ?? null
-      datum[`total_${k}`] = validBuckets[k]?.total_mean ?? null
+      const rawCarry = validBuckets[k]?.carry_mean ?? null
+      const rawTotal = validBuckets[k]?.total_mean ?? null
+      datum[`carry_${k}`] = rawCarry != null ? rawCarry * adjFactor : null
+      datum[`total_${k}`] = rawTotal != null ? rawTotal * totalAdjFactor : null
       datum[`label_${k}`] = validBuckets[k]?.label ?? null
     }
 
@@ -401,18 +442,18 @@ export default function Gapping() {
       // stackOrder = allBuckets reversed: [N, N-1, ..., 2, 1] = low→high effort order
       const stackOrder = allBuckets.slice().reverse()
 
-      // Find the lowest-effort carry as the base
+      // Find the lowest-effort carry as the base (already scaled)
       let baseCarry = 0
       for (const k of stackOrder) {
-        const cv = validBuckets[k]?.carry_mean
+        const cv = datum[`carry_${k}`] as number | null
         if (cv != null) { baseCarry = cv; break }
       }
 
       // Forward-fill carries in stack order (low→high effort = ascending carry)
       const filled: number[] = new Array(stackOrder.length)
-      filled[0] = validBuckets[stackOrder[0]]?.carry_mean ?? baseCarry
+      filled[0] = (datum[`carry_${stackOrder[0]}`] as number | null) ?? baseCarry
       for (let i = 1; i < stackOrder.length; i++) {
-        filled[i] = validBuckets[stackOrder[i]]?.carry_mean ?? filled[i - 1]
+        filled[i] = (datum[`carry_${stackOrder[i]}`] as number | null) ?? filled[i - 1]
       }
 
       datum[`seg_${stackOrder[0]}`] = filled[0]
@@ -424,10 +465,11 @@ export default function Gapping() {
     }
 
     return datum
-  })
+  }), [ascending, allBuckets, matrixByClub, adjusted])
 
-  const hasEffortData = chartData.some((d) =>
-    allBuckets.some((k) => (d[`carry_${k}`] as number | null) != null)
+  const hasEffortData = useMemo(
+    () => chartData.some((d) => allBuckets.some((k) => (d[`carry_${k}`] as number | null) != null)),
+    [chartData, allBuckets],
   )
 
   const clubRegressions = useMemo<ClubRegLine[]>(() => {
@@ -436,7 +478,10 @@ export default function Gapping() {
       const shots = allShots[ct] ?? []
       const pts = shots
         .filter((s) => s.club_speed != null && s.carry_distance != null && !s.is_outlier)
-        .map((s) => ({ x: s.club_speed!, y: s.carry_distance! }))
+        .map((s) => ({
+          x: adjusted ? (s.club_speed_adj ?? s.club_speed!) : s.club_speed!,
+          y: adjusted ? (s.carry_distance_adj ?? s.carry_distance!) : s.carry_distance!,
+        }))
       if (pts.length < 3) return []
       const reg = linearRegression(pts)
       if (!reg) return []
@@ -453,7 +498,7 @@ export default function Gapping() {
         n: pts.length,
       }]
     })
-  }, [ascending, allShots])
+  }, [ascending, allShots, adjusted])
 
   const speedDomain = useMemo(() => {
     if (clubRegressions.length === 0) return ['auto', 'auto'] as const
@@ -480,7 +525,10 @@ export default function Gapping() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold text-white mb-2">Club Gapping</h1>
+      <div className="flex items-center gap-3 mb-2">
+        <h1 className="text-2xl font-bold text-white">Club Gapping</h1>
+        <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
+      </div>
       <p className="text-slate-400 text-sm mb-4">
         Average carry and total distance per club. Gaps are to the next longer club.
         {hasEffortData && ' Bar segments show carry distance by swing effort (low → high).'}
@@ -535,7 +583,7 @@ export default function Gapping() {
           <div className="flex flex-wrap gap-3 mb-3 text-xs text-slate-400">
             {allBuckets.slice().reverse().map((b) => {
               const color = effortColor(parseInt(b), totalBuckets)
-              const rawLabel = matrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
+              const rawLabel = allMatrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
               return (
                 <span key={b}><span className="inline-block w-3 h-3 rounded-sm mr-1" style={{ background: color }} />{effortRankLabel(rawLabel)}</span>
               )
@@ -577,7 +625,7 @@ export default function Gapping() {
         </ResponsiveContainer>
       </div>
 
-      {clubRegressions.length >= 2 && (
+      {clubRegressions.length >= 2 ? (
         <div className="bg-slate-900 rounded-lg p-4 border border-slate-700 mb-6">
           <h2 className="text-white font-semibold mb-1">Carry vs Club Speed — Best Fit Lines</h2>
           <p className="text-slate-500 text-xs mb-4">One regression line per club · hover a line to identify it</p>
@@ -646,23 +694,33 @@ export default function Gapping() {
             ))}
           </div>
         </div>
-      )}
+      ) : !showRegression && ascending.length >= 2 ? (
+        <div className="bg-slate-900 rounded-lg p-4 border border-slate-700 mb-6">
+          <h2 className="text-white font-semibold mb-1">Carry vs Club Speed — Best Fit Lines</h2>
+          <button
+            onClick={() => setShowRegression(true)}
+            className="mt-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 text-sm rounded"
+          >
+            Load regression chart
+          </button>
+        </div>
+      ) : null}
 
-      <ShotSimulator stats={stats} matrix={matrix} allBuckets={allBuckets} totalBuckets={totalBuckets} />
+      <ShotSimulator stats={stats} matrix={allMatrix} allBuckets={allBuckets} />
 
       <div className="overflow-x-auto rounded-lg border border-slate-700">
         <table className="w-full text-sm">
           <thead className="bg-slate-800 text-slate-400 text-left">
             <tr>
               <th className="px-4 py-3">Club</th>
-              <th className="px-4 py-3 text-right">Avg Carry</th>
-              <th className="px-4 py-3 text-right">Carry Range</th>
-              <th className="px-4 py-3 text-right">Avg Total</th>
+              <th className="px-4 py-3 text-right">{adjusted ? '~Avg Carry' : 'Avg Carry'}</th>
+              <th className="px-4 py-3 text-right">{adjusted ? '~Carry Range' : 'Carry Range'}</th>
+              <th className="px-4 py-3 text-right">{adjusted ? '~Avg Total' : 'Avg Total'}</th>
               <th className="px-4 py-3 text-right">±Std Dev</th>
               <th className="px-4 py-3 text-right">Side Disp.</th>
               {hasEffortData && allBuckets.map((b) => {
                 const color = effortColor(parseInt(b), totalBuckets)
-                const rawLabel = matrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
+                const rawLabel = allMatrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
                 return (
                   <th key={b} className="px-4 py-3 text-right" style={{ color }}>
                     {effortRankLabel(rawLabel)}
@@ -676,6 +734,10 @@ export default function Gapping() {
           <tbody>
             {descending.map((c, i) => {
               const buckets = matrixByClub[c.club_type ?? ''] ?? {}
+              const tblAdjFactor = adjusted && c.carry_mean != null && c.carry_mean > 0 && c.carry_mean_adj != null
+                ? c.carry_mean_adj / c.carry_mean : 1.0
+              const tblTotalFactor = adjusted && c.total_mean != null && c.total_mean > 0 && c.total_mean_adj != null
+                ? c.total_mean_adj / c.total_mean : 1.0
               const gapBadge = c.gapUp == null
                 ? null
                 : c.gapUp <= 0
@@ -689,13 +751,13 @@ export default function Gapping() {
                   className={i % 2 === 0 ? 'bg-slate-900 text-slate-200' : 'bg-slate-950 text-slate-200'}
                 >
                   <td className="px-4 py-2.5 font-medium text-white">{c.club_type}</td>
-                  <td className="px-4 py-2.5 text-right">{n(c.carry_mean)} yds</td>
+                  <td className="px-4 py-2.5 text-right">{n(adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean)} yds</td>
                   <td className="px-4 py-2.5 text-right text-slate-400">
                     {c.carry_mean != null && c.carry_std != null
-                      ? `${n(c.carry_mean, 0)} ± ${n(c.carry_std, 0)} yds`
-                      : c.carry_mean != null ? `${n(c.carry_mean, 0)} yds` : '—'}
+                      ? `${n(adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean, 0)} ± ${n(c.carry_std, 0)} yds`
+                      : c.carry_mean != null ? `${n(adjusted ? (c.carry_mean_adj ?? c.carry_mean) : c.carry_mean, 0)} yds` : '—'}
                   </td>
-                  <td className="px-4 py-2.5 text-right text-slate-300">{n(c.total_mean)} yds</td>
+                  <td className="px-4 py-2.5 text-right text-slate-300">{n(adjusted ? (c.total_mean_adj ?? c.total_mean) : c.total_mean)} yds</td>
                   <td className="px-4 py-2.5 text-right text-slate-400">±{n(c.carry_std)}</td>
                   <td className="px-4 py-2.5 text-right text-slate-400">±{n(c.side_carry_std)} yds</td>
                   {hasEffortData && allBuckets.map((b) => {
@@ -705,11 +767,12 @@ export default function Gapping() {
                       <td key={b} className="px-4 py-2.5 text-right" style={{ color }}>
                         {bkt ? (
                           <div className="leading-tight">
-                            <div>{n(bkt.carry_mean)} / {n(bkt.total_mean)} yds</div>
+                            <div>{n(bkt.carry_mean != null ? bkt.carry_mean * tblAdjFactor : null)} / {n(bkt.total_mean != null ? bkt.total_mean * tblTotalFactor : null)} yds</div>
                             <div className="text-xs opacity-60">±{n(bkt.carry_std)} dist</div>
                             <div className="text-xs opacity-60">±{n(bkt.side_carry_std)} side</div>
                             <div className="text-xs opacity-60">{n(bkt.apex_mean)} apex</div>
-                            <div className="text-xs opacity-60">{n(bkt.speed_mean)} mph</div>
+                            <div className="text-xs opacity-60">{n(bkt.speed_mean)} mph club</div>
+                            <div className="text-xs opacity-60">{n(bkt.ball_speed_mean)} mph ball</div>
                             <div className="text-xs opacity-60">{n(bkt.spin_rate_mean, 0)} rpm</div>
                             <div className="text-xs opacity-60">{n(bkt.smash_factor_mean, 2)} smash</div>
                             <div className="text-xs opacity-60">{n(bkt.attack_angle_mean, 1)}° AoA</div>
@@ -740,7 +803,7 @@ export default function Gapping() {
           {hasEffortData && (
             <span>Effort: {allBuckets.slice().reverse().map((b) => {
               const color = effortColor(parseInt(b), totalBuckets)
-              const rawLabel = matrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
+              const rawLabel = allMatrix.find((r) => r.buckets[b]?.label)?.buckets[b]?.label ?? `Bucket ${b}`
               return (
                 <span key={b}><span style={{ color }}>●</span> {effortRankLabel(rawLabel)} &nbsp;</span>
               )
@@ -748,6 +811,7 @@ export default function Gapping() {
           )}
         </div>
       </div>
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

@@ -1,12 +1,15 @@
-import { useEffect, useState, useMemo } from 'react'
+import { useEffect, useState, useMemo, useCallback, memo } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import {
   ComposedChart, LineChart, Line, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   ScatterChart, Scatter, ReferenceLine, Legend,
 } from 'recharts'
 import { api } from '../api'
-import type { ClubStats, TrendPoint, ClubOption, Shot, SwingEffortBucket } from '../api'
+import type { ClubStats, TrendPoint, ClubOption, Shot, SwingEffortBucket, UserSettings } from '../api'
 import { useBag } from '../BagContext'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 const CLUB_ORDER = ['d', '3w', '5w', '7w', '2h', '3h', '4h', '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i', 'pw', 'gw', 'sw', 'lw']
 
@@ -78,6 +81,52 @@ function percentile(sorted: number[], p: number): number {
   const hi = Math.ceil(idx)
   if (lo === hi) return sorted[lo]
   return sorted[lo] + (idx - lo) * (sorted[hi] - sorted[lo])
+}
+
+function clientMean(vals: number[]): number | null {
+  return vals.length === 0 ? null : vals.reduce((s, v) => s + v, 0) / vals.length
+}
+
+function clientStd(vals: number[]): number | null {
+  if (vals.length < 2) return null
+  const m = vals.reduce((s, v) => s + v, 0) / vals.length
+  return Math.sqrt(vals.reduce((s, v) => s + (v - m) ** 2, 0) / (vals.length - 1))
+}
+
+type NumericShotKey = {
+  [K in keyof Shot]: Shot[K] extends number | null ? K : never
+}[keyof Shot]
+
+function statsFromShots(shots: Shot[]): ClubStats | null {
+  const clean = shots.filter((s) => !s.is_outlier)
+  if (clean.length === 0) return null
+  const nums = (key: NumericShotKey): number[] =>
+    clean.map((s) => s[key]).filter((v): v is number => typeof v === 'number')
+  return {
+    club: clean[0].club ?? '',
+    club_type: clean[0].club_type ?? null,
+    shot_count: clean.length,
+    carry_mean:            clientMean(nums('carry_distance')),
+    carry_std:             clientStd(nums('carry_distance')),
+    total_mean:            clientMean(nums('total_distance')),
+    total_std:             clientStd(nums('total_distance')),
+    ball_speed_mean:       clientMean(nums('ball_speed')),
+    spin_rate_mean:        clientMean(nums('spin_rate')),
+    smash_factor_mean:     clientMean(nums('smash_factor')),
+    side_carry_mean:       clientMean(nums('side_carry')),
+    side_carry_std:        clientStd(nums('side_carry')),
+    launch_angle_mean:     clientMean(nums('launch_angle')),
+    club_speed_mean:       clientMean(nums('club_speed')),
+    spin_axis_mean:        clientMean(nums('spin_axis')),
+    club_path_mean:        clientMean(nums('club_path')),
+    attack_angle_mean:     clientMean(nums('attack_angle')),
+    launch_direction_mean: clientMean(nums('launch_direction')),
+    apex_mean:             clientMean(nums('apex')),
+    carry_mean_adj:        clientMean(nums('carry_distance_adj')),
+    total_mean_adj:        clientMean(nums('total_distance_adj')),
+    ball_speed_mean_adj:   clientMean(nums('ball_speed_adj')),
+    club_speed_mean_adj:   clientMean(nums('club_speed_adj')),
+  }
 }
 
 // ── PCA / ellipse helpers ──────────────────────────────────────────────────
@@ -250,30 +299,411 @@ interface DispersionPoint {
   shot_count: number
 }
 
+// ── Memoized heavy sections ────────────────────────────────────────────────
+
+interface SessionsTrendChartProps {
+  trendWithBands: Array<{
+    session_id: string
+    session_date: string
+    mean: number | null
+    std: number | null
+    shot_count: number
+    lower: number
+    bandWidth: number
+    speed_mean: number | null
+    speed_min: number | null
+    speed_max: number | null
+  }>
+  speedTrend: TrendPoint[]
+  metric: string
+  onMetricChange: (m: string) => void
+}
+
+const SessionsTrendChart = memo(function SessionsTrendChart({
+  trendWithBands, speedTrend, metric, onMetricChange,
+}: SessionsTrendChartProps) {
+  return (
+    <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
+      <div className="flex items-center justify-between mb-1">
+        <h2 className="text-white font-semibold">Sessions</h2>
+        <select
+          value={metric}
+          onChange={(e) => onMetricChange(e.target.value)}
+          className="bg-slate-800 text-white rounded px-2 py-1 text-xs border border-slate-600"
+        >
+          {TREND_METRICS.map((m) => (
+            <option key={m.key} value={m.key}>{m.label}</option>
+          ))}
+        </select>
+      </div>
+      <p className="text-slate-500 text-xs mb-3">
+        <span className="text-green-400">—</span>{' '}
+        {TREND_METRICS.find((m) => m.key === metric)?.label ?? metric}
+        &nbsp;·&nbsp; shaded band = ±1 std dev
+        {speedTrend.length > 0 && (
+          <>&nbsp;·&nbsp;<span className="text-sky-400">— — —</span> club speed (right axis)</>
+        )}
+      </p>
+      <ResponsiveContainer width="100%" height={260}>
+        <ComposedChart data={trendWithBands} margin={{ top: 4, right: 48, bottom: 4, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis dataKey="session_date" tickFormatter={fmtDate} tick={{ fill: '#94a3b8', fontSize: 11 }} />
+          <YAxis yAxisId="left" tick={{ fill: '#94a3b8', fontSize: 11 }} domain={['auto', 'auto']} />
+          {speedTrend.length > 0 && (
+            <YAxis
+              yAxisId="right"
+              orientation="right"
+              tick={{ fill: '#60a5fa', fontSize: 10 }}
+              domain={['auto', 'auto']}
+              width={40}
+              label={{ value: 'mph', position: 'insideRight', fill: '#60a5fa', fontSize: 10, offset: 8 }}
+            />
+          )}
+          <Tooltip
+            contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6 }}
+            labelStyle={{ color: '#94a3b8' }}
+            labelFormatter={(d) => fmtDate(String(d))}
+            content={({ active, payload, label }) => {
+              if (!active || !payload?.length) return null
+              const d = payload[0]?.payload as SessionsTrendChartProps['trendWithBands'][0] | undefined
+              if (!d) return null
+              const metricLabel = TREND_METRICS.find((m) => m.key === metric)?.label ?? metric
+              return (
+                <div style={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6, padding: '8px 12px', fontSize: 12 }}>
+                  <div className="text-slate-400 mb-1">{fmtDate(String(label))}</div>
+                  <div className="text-slate-300">
+                    {metricLabel}: <span className="text-white font-medium">{d.mean != null ? d.mean.toFixed(1) : '—'}</span>
+                    {d.std != null && d.std > 0 && <span className="text-slate-500"> ±{d.std.toFixed(1)}</span>}
+                  </div>
+                  {d.speed_mean != null && (
+                    <div className="text-slate-300 mt-0.5">
+                      Club speed: <span className="text-sky-300 font-medium">{d.speed_mean.toFixed(1)} mph</span>
+                      {d.speed_min != null && d.speed_max != null && (
+                        <span className="text-slate-500"> ({d.speed_min.toFixed(0)}–{d.speed_max.toFixed(0)})</span>
+                      )}
+                    </div>
+                  )}
+                  <div className="text-slate-500 mt-0.5">{d.shot_count} shots</div>
+                </div>
+              )
+            }}
+          />
+          <Area
+            yAxisId="left"
+            type="monotone"
+            dataKey="lower"
+            fill="transparent"
+            stroke="none"
+            stackId="band"
+            legendType="none"
+            isAnimationActive={false}
+          />
+          <Area
+            yAxisId="left"
+            type="monotone"
+            dataKey="bandWidth"
+            fill="#4ade80"
+            fillOpacity={0.12}
+            stroke="none"
+            stackId="band"
+            legendType="none"
+            isAnimationActive={false}
+          />
+          <Line
+            yAxisId="left"
+            type="monotone"
+            dataKey="mean"
+            stroke="#4ade80"
+            strokeWidth={2}
+            dot={{ r: 4, fill: '#4ade80' }}
+            activeDot={{ r: 6 }}
+            legendType="none"
+          />
+          {speedTrend.length > 0 && (
+            <Line
+              yAxisId="right"
+              type="monotone"
+              dataKey="speed_mean"
+              stroke="#60a5fa"
+              strokeWidth={1.5}
+              strokeDasharray="5 3"
+              dot={{ r: 3, fill: '#60a5fa' }}
+              activeDot={{ r: 5 }}
+              connectNulls
+              legendType="none"
+              isAnimationActive={false}
+            />
+          )}
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
+  )
+})
+
+interface EffortDispersionSectionProps {
+  effortDisp: EffortDispersion[]
+}
+
+const EffortDispersionSection = memo(function EffortDispersionSection({
+  effortDisp,
+}: EffortDispersionSectionProps) {
+  if (effortDisp.length < 2) return null
+  return (
+    <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
+      <div className="mb-4">
+        <h2 className="text-white font-semibold">Dispersion by Swing Effort</h2>
+        <p className="text-slate-500 text-xs mt-1">80% confidence ellipse per effort level · outliers excluded</p>
+        {(() => {
+          const lowest = effortDisp[0]
+          const highest = effortDisp[effortDisp.length - 1]
+          if (!lowest?.ellipse || !highest?.ellipse) return null
+          const deltaCarry = highest.ellipse.cy - lowest.ellipse.cy
+          const dispersalRatio = lowest.ellipse.rx > 0.1 ? highest.ellipse.rx / lowest.ellipse.rx : null
+          return (
+            <p className="text-slate-400 text-xs mt-1">
+              {highest.label}: <span className="text-white">{deltaCarry >= 0 ? '+' : ''}{deltaCarry.toFixed(0)} yds carry</span> vs {lowest.label}
+              {dispersalRatio != null && (
+                <>, <span className="text-white">{dispersalRatio.toFixed(1)}×</span> lateral spread</>
+              )}
+            </p>
+          )
+        })()}
+      </div>
+      <div className={`grid gap-4 ${effortDisp.length <= 2 ? 'grid-cols-1 sm:grid-cols-2' : effortDisp.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'}`}>
+        {effortDisp.map(({ effortKey, label, color, pts, ellipse: ell, ellipsePts: ePts, speedMin, speedMax }) => (
+          <div key={effortKey} className="bg-slate-800 rounded-lg p-3 border border-slate-700">
+            <div className="flex items-center justify-between mb-2">
+              <div>
+                <span className="text-sm font-semibold" style={{ color }}>{label}</span>
+                {speedMin != null && speedMax != null && (
+                  <span className="text-slate-400 text-xs ml-2">{speedMin.toFixed(0)}–{speedMax.toFixed(0)} mph</span>
+                )}
+              </div>
+              {ell && (
+                <span className="text-slate-500 text-xs">{ell.inlierCount}/{pts.length} shots</span>
+              )}
+            </div>
+            <ResponsiveContainer width="100%" height={220}>
+              <ScatterChart margin={{ top: 4, right: 12, bottom: 20, left: 0 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                <XAxis
+                  type="number"
+                  dataKey="x"
+                  name="Side Carry"
+                  label={{ value: 'Side (yds)', position: 'bottom', fill: '#94a3b8', fontSize: 10 }}
+                  tick={{ fill: '#94a3b8', fontSize: 10 }}
+                  domain={['auto', 'auto']}
+                />
+                <YAxis
+                  type="number"
+                  dataKey="y"
+                  name="Carry"
+                  tick={{ fill: '#94a3b8', fontSize: 10 }}
+                  domain={['auto', 'auto']}
+                  width={38}
+                />
+                <Tooltip
+                  cursor={{ strokeDasharray: '3 3' }}
+                  content={({ active, payload }) => {
+                    if (!active || !payload?.length) return null
+                    const d = payload[0].payload as ShotPoint
+                    return (
+                      <div style={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6, padding: '6px 10px', fontSize: 11 }}>
+                        <div className="text-slate-300">Carry: <span className="text-white">{d.y.toFixed(1)} yds</span></div>
+                        <div className="text-slate-300">Side: <span className="text-white">{d.x.toFixed(1)} yds</span></div>
+                        <div className="text-slate-300">Club Speed: <span className="text-white">{d.club_speed != null ? `${d.club_speed.toFixed(1)} mph` : '—'}</span></div>
+                      </div>
+                    )
+                  }}
+                />
+                <ReferenceLine x={0} stroke="#475569" />
+                {ePts.length > 0 && (
+                  <Scatter
+                    data={ePts}
+                    line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    isAnimationActive={false}
+                    legendType="none"
+                  />
+                )}
+                <Scatter data={pts} fill={color} fillOpacity={0.7} isAnimationActive={false} />
+              </ScatterChart>
+            </ResponsiveContainer>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+})
+
+// clubBuckets is passed so the prop signature is stable — the component uses it only in the IIFE-turned-body
+interface StoppingPowerTableProps {
+  viewShots: Shot[]
+  clubBuckets: SwingEffortBucket[]
+}
+
+const StoppingPowerTable = memo(function StoppingPowerTable({ viewShots, clubBuckets }: StoppingPowerTableProps) {
+  if (!viewShots.some((s) => s.roll_medium_standard != null)) return null
+  const totalBuckets = clubBuckets.length
+  const effortKeys = [...new Set(viewShots.map((s) => s.swing_effort).filter((e): e is string => e != null && e !== 'unknown'))]
+    .sort((a, b) => parseInt(a) - parseInt(b))
+  const effortRows = effortKeys.flatMap((effortKey) => {
+    const group = viewShots.filter((s) => s.swing_effort === effortKey && !s.is_outlier && s.roll_medium_standard != null)
+    if (group.length === 0) return []
+    const avg = (arr: (number | null)[]) => {
+      const vals = arr.filter((v): v is number => v != null)
+      return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
+    }
+    const bucketIdx = parseInt(effortKey)
+    const label = clubBuckets.find((b) => b.bucket_index === bucketIdx)?.label ?? `Bucket ${effortKey}`
+    return [{
+      effortKey,
+      label,
+      color: bucketColor(bucketIdx, totalBuckets || effortKeys.length),
+      n: group.length,
+      rollStd: avg(group.map((s) => s.roll_medium_standard)),
+      rollFly: avg(group.map((s) => s.roll_medium_flyer)),
+      flyCarry: avg(group.map((s) => s.flyer_carry_est)),
+      carry: avg(group.map((s) => s.carry_distance)),
+    }]
+  })
+  if (effortRows.length === 0) return null
+  return (
+    <div className="mt-6 bg-slate-900 rounded-lg border border-slate-700">
+      <div className="px-4 py-3 border-b border-slate-700">
+        <h2 className="text-white font-semibold">Stopping Power by Swing Effort</h2>
+        <p className="text-slate-500 text-xs mt-0.5">
+          Roll and carry estimates on medium greens · outliers excluded
+        </p>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead className="bg-slate-800 text-slate-400 text-left">
+            <tr>
+              <th className="px-4 py-2">Effort</th>
+              <th className="px-4 py-2 text-right">Shots</th>
+              <th className="px-4 py-2 text-right">Carry (yds)</th>
+              <th className="px-4 py-2 text-right">Roll · Std Lie (ft)</th>
+              <th className="px-4 py-2 text-right">Roll · Flyer Lie (ft)</th>
+              <th className="px-4 py-2 text-right">Flyer Carry Est (yds)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {effortRows.map((row, i) => (
+              <tr
+                key={row.effortKey}
+                className={i % 2 === 0 ? 'bg-slate-900 text-slate-200' : 'bg-slate-950 text-slate-200'}
+              >
+                <td className="px-4 py-2 font-semibold" style={{ color: row.color }}>
+                  {row.label}
+                </td>
+                <td className="px-4 py-2 text-right text-slate-400">{row.n}</td>
+                <td className="px-4 py-2 text-right">{n(row.carry)}</td>
+                <td className="px-4 py-2 text-right">
+                  <span className={row.rollStd != null && row.rollStd < 0 ? 'text-cyan-400' : ''}>
+                    {row.rollStd != null ? (row.rollStd >= 0 ? '+' : '') + n(row.rollStd) : '—'}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-right text-amber-300">
+                  {row.rollFly != null ? '+' + n(row.rollFly) : '—'}
+                </td>
+                <td className="px-4 py-2 text-right text-amber-300">
+                  {n(row.flyCarry)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+})
+
+interface DispersionTrendChartProps {
+  dispTrend: DispersionPoint[]
+}
+
+const DispersionTrendChart = memo(function DispersionTrendChart({ dispTrend }: DispersionTrendChartProps) {
+  if (dispTrend.length <= 1) return null
+  return (
+    <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
+      <div className="mb-4">
+        <h2 className="text-white font-semibold">Dispersion Over Time</h2>
+        <p className="text-slate-500 text-xs mt-1">
+          Std dev of carry distance and side carry per session — lower = more consistent
+        </p>
+      </div>
+      <ResponsiveContainer width="100%" height={240}>
+        <LineChart data={dispTrend} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+          <XAxis dataKey="session_date" tickFormatter={fmtDate} tick={{ fill: '#94a3b8', fontSize: 11 }} />
+          <YAxis
+            tick={{ fill: '#94a3b8', fontSize: 11 }}
+            domain={[0, 'auto']}
+            label={{ value: 'Std Dev (yds)', angle: -90, position: 'insideLeft', fill: '#94a3b8', fontSize: 11 }}
+          />
+          <Tooltip
+            contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6 }}
+            labelStyle={{ color: '#94a3b8' }}
+            itemStyle={{ color: '#fff' }}
+            labelFormatter={(d) => fmtDate(String(d))}
+            formatter={(v, name) => [
+              v != null ? `±${Number(v).toFixed(1)} yds` : '—',
+              name === 'carry_std' ? 'Carry Std Dev' : 'Side Carry Std Dev',
+            ]}
+          />
+          <Legend
+            formatter={(value: string) =>
+              value === 'carry_std' ? 'Carry Std Dev' : 'Side Carry Std Dev'
+            }
+            wrapperStyle={{ color: '#94a3b8', fontSize: 12 }}
+          />
+          <Line
+            type="monotone"
+            dataKey="carry_std"
+            stroke="#4ade80"
+            strokeWidth={2}
+            dot={{ r: 3, fill: '#4ade80' }}
+            connectNulls
+            isAnimationActive={false}
+          />
+          <Line
+            type="monotone"
+            dataKey="side_std"
+            stroke="#60a5fa"
+            strokeWidth={2}
+            dot={{ r: 3, fill: '#60a5fa' }}
+            connectNulls
+            isAnimationActive={false}
+          />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+})
+
 export default function ClubDashboard() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [allClubs, setAllClubs] = useState<ClubOption[]>([])
   const [selectedClub, setSelectedClub] = useState<string>(() => searchParams.get('club') ?? '')
   const { isActive, disabledClubs } = useBag()
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
   const clubs = allClubs.filter((c) => isActive(c.club_type, c.club))
-  const [stats, setStats] = useState<ClubStats | null>(null)
   const [metric, setMetric] = useState('carry_distance')
   const [trend, setTrend] = useState<TrendPoint[]>([])
-  const [dispersion, setDispersion] = useState<Point[]>([])
-  const [ellipse, setEllipse] = useState<Ellipse | null>(null)
-  const [ellipsePts, setEllipsePts] = useState<Point[]>([])
+
   const [dispTrend, setDispTrend] = useState<DispersionPoint[]>([])
   const [shots, setShots] = useState<Shot[]>([])
   const [speedTrend, setSpeedTrend] = useState<TrendPoint[]>([])
-  const [effortDisp, setEffortDisp] = useState<EffortDispersion[]>([])
+
   const [clubBuckets, setClubBuckets] = useState<SwingEffortBucket[]>([])
   const [shotSort, setShotSort] = useState<SortState>({ key: 'session_date', dir: 'asc' })
   const [editing, setEditing] = useState<string | null>(null)
   const [noteText, setNoteText] = useState('')
   const [shotLogExpanded, setShotLogExpanded] = useState(false)
   const [recentDays, setRecentDays] = useState(14)
-  const [recentStats, setRecentStats] = useState<ClubStats | null>(null)
-  const [historicalStats, setHistoricalStats] = useState<ClubStats | null>(null)
   const [enabledEfforts, setEnabledEfforts] = useState<Set<string>>(new Set())
   const [globalDateFrom, setGlobalDateFrom] = useState('')
   const [globalDateTo, setGlobalDateTo] = useState('')
@@ -309,7 +739,7 @@ export default function ClubDashboard() {
   const carryPercentiles = useMemo(() => {
     const vals = filteredShots
       .filter((s) => s.carry_distance != null && !s.is_outlier)
-      .map((s) => s.carry_distance!)
+      .map((s) => adjusted ? (s.carry_distance_adj ?? s.carry_distance!) : s.carry_distance!)
       .sort((a, b) => a - b)
     if (vals.length < 3) return null
     const q1 = percentile(vals, 25)
@@ -318,12 +748,12 @@ export default function ClubDashboard() {
     const clean = vals.length >= 8 ? vals.filter((v) => v >= q1 - fence && v <= q3 + fence) : vals
     if (clean.length < 3) return null
     return { p10: percentile(clean, 10), p50: percentile(clean, 50), p90: percentile(clean, 90) }
-  }, [filteredShots])
+  }, [filteredShots, adjusted])
 
   const sessionContext = useMemo(() => {
     if (filteredShots.length === 0) return null
     const sessionIds = new Set(filteredShots.map((s) => s.session_id))
-    const dates = filteredShots.map((s) => s.session_date).filter(Boolean).sort()
+    const dates = filteredShots.map((s) => s.session_date).filter((d): d is string => d !== null).sort()
     const dateRange = dates.length > 0
       ? dates[0] === dates[dates.length - 1]
         ? fmtDate(dates[0])
@@ -336,15 +766,15 @@ export default function ClubDashboard() {
     const speedBySession = new Map(speedTrend.map((pt) => [pt.session_id, pt]))
     return trend.map((pt) => {
       const sp = speedBySession.get(pt.session_id)
-      const lower = pt.mean - (pt.std ?? 0)
+      const lower = (pt.mean ?? 0) - (pt.std ?? 0)
       const bandWidth = 2 * (pt.std ?? 0)
       return {
         ...pt,
         lower,
         bandWidth,
         speed_mean: sp?.mean ?? null,
-        speed_min: sp != null ? sp.mean - (sp.std ?? 0) : null,
-        speed_max: sp != null ? sp.mean + (sp.std ?? 0) : null,
+        speed_min: sp != null ? (sp.mean ?? 0) - (sp.std ?? 0) : null,
+        speed_max: sp != null ? (sp.mean ?? 0) + (sp.std ?? 0) : null,
       }
     })
   }, [trend, speedTrend])
@@ -362,6 +792,31 @@ export default function ClubDashboard() {
     })
   }, [filteredShots, shotSort])
 
+  const stats = useMemo(() => statsFromShots(filteredShots), [filteredShots])
+
+  const recentStats = useMemo(() => {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - recentDays)
+    const cutoffStr = cutoff.toISOString().split('T')[0]
+    const recent = filteredShots.filter((s) =>
+      s.session_date != null && s.session_date >= cutoffStr &&
+      (!globalDateTo || s.session_date <= globalDateTo)
+    )
+    return statsFromShots(recent)
+  }, [filteredShots, recentDays, globalDateTo])
+
+  const historicalStats = useMemo(() => {
+    const cutoff = new Date()
+    cutoff.setDate(cutoff.getDate() - recentDays)
+    cutoff.setDate(cutoff.getDate() - 1)
+    const histCutoffStr = cutoff.toISOString().split('T')[0]
+    const hist = filteredShots.filter((s) =>
+      s.session_date != null && s.session_date <= histCutoffStr &&
+      (!globalDateFrom || s.session_date >= globalDateFrom)
+    )
+    return statsFromShots(hist)
+  }, [filteredShots, recentDays, globalDateFrom])
+
   type CompRow = {
     label: string
     hist: number | null
@@ -373,25 +828,25 @@ export default function ClubDashboard() {
 
   const comparisonRows = useMemo((): CompRow[] => [
     {
-      label: 'Carry Distance',
-      hist: historicalStats?.carry_mean ?? null,
-      recent: recentStats?.carry_mean ?? null,
+      label: adjusted ? '~Carry Distance' : 'Carry Distance',
+      hist: adjusted ? (historicalStats?.carry_mean_adj ?? historicalStats?.carry_mean ?? null) : (historicalStats?.carry_mean ?? null),
+      recent: adjusted ? (recentStats?.carry_mean_adj ?? recentStats?.carry_mean ?? null) : (recentStats?.carry_mean ?? null),
       valFmt: (v) => `${v.toFixed(1)} yds`,
       deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)} yds`,
       direction: 'higher',
     },
     {
-      label: 'Ball Speed',
-      hist: historicalStats?.ball_speed_mean ?? null,
-      recent: recentStats?.ball_speed_mean ?? null,
+      label: adjusted ? '~Ball Speed' : 'Ball Speed',
+      hist: adjusted ? (historicalStats?.ball_speed_mean_adj ?? historicalStats?.ball_speed_mean ?? null) : (historicalStats?.ball_speed_mean ?? null),
+      recent: adjusted ? (recentStats?.ball_speed_mean_adj ?? recentStats?.ball_speed_mean ?? null) : (recentStats?.ball_speed_mean ?? null),
       valFmt: (v) => `${v.toFixed(1)} mph`,
       deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)} mph`,
       direction: 'higher',
     },
     {
-      label: 'Club Speed',
-      hist: historicalStats?.club_speed_mean ?? null,
-      recent: recentStats?.club_speed_mean ?? null,
+      label: adjusted ? '~Club Speed' : 'Club Speed',
+      hist: adjusted ? (historicalStats?.club_speed_mean_adj ?? historicalStats?.club_speed_mean ?? null) : (historicalStats?.club_speed_mean ?? null),
+      recent: adjusted ? (recentStats?.club_speed_mean_adj ?? recentStats?.club_speed_mean ?? null) : (recentStats?.club_speed_mean ?? null),
       valFmt: (v) => `${v.toFixed(1)} mph`,
       deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)} mph`,
       direction: 'higher',
@@ -452,7 +907,23 @@ export default function ClubDashboard() {
       deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)}°`,
       direction: 'neutral',
     },
-  ], [historicalStats, recentStats])
+    {
+      label: 'Club Path',
+      hist: historicalStats?.club_path_mean ?? null,
+      recent: recentStats?.club_path_mean ?? null,
+      valFmt: (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`,
+      deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)}°`,
+      direction: 'closer-to-zero',
+    },
+    {
+      label: 'Spin Axis',
+      hist: historicalStats?.spin_axis_mean ?? null,
+      recent: recentStats?.spin_axis_mean ?? null,
+      valFmt: (v) => `${v >= 0 ? '+' : ''}${v.toFixed(1)}°`,
+      deltaFmt: (d) => `${d >= 0 ? '+' : ''}${d.toFixed(1)}°`,
+      direction: 'closer-to-zero',
+    },
+  ], [historicalStats, recentStats, adjusted])
 
   const effortProportions = useMemo(() => {
     const cutoff = new Date()
@@ -479,6 +950,10 @@ export default function ClubDashboard() {
   }, [filteredShots, recentDays])
 
   useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
+
+  useEffect(() => {
     api.clubList().then((list) => {
       const sorted = sortClubs(list)
       setAllClubs(sorted)
@@ -501,34 +976,37 @@ export default function ClubDashboard() {
       setShots(fetched)
       const buckets = allThresholds.find((t) => t.club_type === selectedClub)?.buckets ?? []
       setClubBuckets(buckets)
+      setEnabledEfforts(new Set(buckets.map((b) => String(b.bucket_index))))
     })
   }, [selectedClub, disabledClubs])
 
-  useEffect(() => {
-    setEnabledEfforts(new Set(clubBuckets.map((b) => String(b.bucket_index))))
-  }, [clubBuckets])
-
-  // Effect B — recompute dispersion from filteredShots
-  useEffect(() => {
-    const pts = filteredShots
+  // Derived: dispersion scatter points (replaces Effect B)
+  const dispersion = useMemo(() => {
+    return filteredShots
       .filter((s) => s.side_carry != null && s.carry_distance != null && !s.is_outlier)
-      .map((s) => ({ x: s.side_carry!, y: s.carry_distance! }))
+      .map((s) => ({
+        x: s.side_carry!,
+        y: adjusted ? (s.carry_distance_adj ?? s.carry_distance!) : s.carry_distance!,
+      }))
       .sort((a, b) => a.x - b.x)
-    setDispersion(pts)
-    const e = computeEllipse(pts)
-    setEllipse(e)
-    setEllipsePts(e ? ellipseOutlinePoints(e) : [])
-  }, [filteredShots])
+  }, [filteredShots, adjusted])
 
-  // Effect C — recompute effortDisp from viewShots + clubBuckets
-  useEffect(() => {
+  const ellipse = useMemo(() => computeEllipse(dispersion), [dispersion])
+  const ellipsePts = useMemo(() => (ellipse ? ellipseOutlinePoints(ellipse) : []), [ellipse])
+
+  // Derived: per-effort dispersion groups (replaces Effect C)
+  const effortDisp = useMemo(() => {
     const totalBuckets = clubBuckets.length
     const effortKeys = [...new Set(viewShots.map((s) => s.swing_effort).filter((e): e is string => e != null && e !== 'unknown'))]
       .sort((a, b) => parseInt(a) - parseInt(b))
     const groups: EffortDispersion[] = effortKeys.flatMap((effortKey) => {
       const ePts = viewShots
         .filter((s) => s.swing_effort === effortKey && s.side_carry != null && s.carry_distance != null && !s.is_outlier)
-        .map((s) => ({ x: s.side_carry!, y: s.carry_distance!, club_speed: s.club_speed }))
+        .map((s) => ({
+          x: s.side_carry!,
+          y: adjusted ? (s.carry_distance_adj ?? s.carry_distance!) : s.carry_distance!,
+          club_speed: adjusted ? (s.club_speed_adj ?? s.club_speed) : s.club_speed,
+        }))
         .sort((a, b) => a.x - b.x)
       if (ePts.length < 3) return []
       const ell = computeEllipse(ePts)
@@ -540,27 +1018,8 @@ export default function ClubDashboard() {
       const color = bucketColor(bucketIdx, totalBuckets || effortKeys.length)
       return [{ effortKey, label, color, pts: ePts, ellipse: ell, ellipsePts: ell ? ellipseOutlinePoints(ell) : [], speedMin, speedMax }]
     })
-    setEffortDisp(groups.length >= 2 ? groups : [])
-  }, [viewShots, clubBuckets])
-
-  // Effect D — fetch clubStats
-  useEffect(() => {
-    if (!selectedClub) return
-    const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
-    const allEffortKeys = clubBuckets.map((b) => String(b.bucket_index))
-    const effortParam = allEffortKeys.length > 0 && enabledEfforts.size > 0 && enabledEfforts.size < allEffortKeys.length
-      ? [...enabledEfforts].sort().join(',')
-      : undefined
-    const params = {
-      ...(disabledParam ? { disabled_clubs: disabledParam } : {}),
-      ...(globalDateFrom ? { date_from: globalDateFrom } : {}),
-      ...(globalDateTo   ? { date_to:   globalDateTo   } : {}),
-      ...(effortParam    ? { effort:     effortParam    } : {}),
-    }
-    api.clubStats(params).then((all) => {
-      setStats(all.find((c) => c.club_type === selectedClub) ?? null)
-    })
-  }, [selectedClub, disabledClubs, globalDateFrom, globalDateTo, enabledEfforts, clubBuckets])
+    return groups.length >= 2 ? groups : []
+  }, [viewShots, clubBuckets, adjusted])
 
   // Effect E — fetch trend data
   useEffect(() => {
@@ -609,39 +1068,35 @@ export default function ClubDashboard() {
     })
   }, [selectedClub, metric, disabledClubs, globalDateFrom, globalDateTo])
 
-  // Comparison effect
-  useEffect(() => {
-    if (!selectedClub) return
-    const cutoff = new Date()
-    cutoff.setDate(cutoff.getDate() - recentDays)
-    const cutoffStr = cutoff.toISOString().split('T')[0]
-    const histCutoff = new Date(cutoff)
-    histCutoff.setDate(histCutoff.getDate() - 1)
-    const histCutoffStr = histCutoff.toISOString().split('T')[0]
-    const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
-    const allEffortKeys = clubBuckets.map((b) => String(b.bucket_index))
-    const effortParam = allEffortKeys.length > 0 && enabledEfforts.size < allEffortKeys.length && enabledEfforts.size > 0
-      ? [...enabledEfforts].sort().join(',')
-      : undefined
-    const extra = {
-      ...(disabledParam ? { disabled_clubs: disabledParam } : {}),
-      ...(effortParam ? { effort: effortParam } : {}),
-    }
-    Promise.all([
-      api.clubStats({ date_from: cutoffStr, ...(globalDateTo ? { date_to: globalDateTo } : {}), ...extra }),
-      api.clubStats({ date_to: histCutoffStr, ...(globalDateFrom ? { date_from: globalDateFrom } : {}), ...extra }),
-    ]).then(([recentAll, histAll]) => {
-      setRecentStats(recentAll.find((c) => c.club_type === selectedClub) ?? null)
-      setHistoricalStats(histAll.find((c) => c.club_type === selectedClub) ?? null)
-    })
-  }, [selectedClub, recentDays, disabledClubs, enabledEfforts, clubBuckets, globalDateFrom, globalDateTo])
-
   const clubName = clubs.find((c) => c.club_type === selectedClub)?.club ?? selectedClub
+
+  // Derived: carry vs club speed regression chart data (replaces IIFE in JSX)
+  const speedCarryChart = useMemo(() => {
+    const speedCarryPts = viewShots
+      .filter((s) => s.club_speed != null && s.carry_distance != null && !s.is_outlier)
+      .map((s) => ({
+        x: adjusted ? (s.club_speed_adj ?? s.club_speed!) : s.club_speed!,
+        y: adjusted ? (s.carry_distance_adj ?? s.carry_distance!) : s.carry_distance!,
+      }))
+    if (speedCarryPts.length < 3) return null
+    const reg = linearRegression(speedCarryPts)
+    const xs = speedCarryPts.map((p) => p.x)
+    const minX = Math.min(...xs)
+    const maxX = Math.max(...xs)
+    const regLinePts = reg
+      ? [{ x: minX, y: reg.slope * minX + reg.intercept }, { x: maxX, y: reg.slope * maxX + reg.intercept }]
+      : []
+    const r2 = reg ? rSquared(speedCarryPts, reg.slope, reg.intercept) : null
+    return { speedCarryPts, reg, regLinePts, r2 }
+  }, [viewShots, adjusted])
+
+  const handleMetricChange = useCallback((m: string) => setMetric(m), [])
 
   return (
     <div>
       <div className="flex items-center gap-4 mb-4 flex-wrap">
         <h1 className="text-2xl font-bold text-white">Club Dashboard</h1>
+        <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
         <select
           value={selectedClub}
           onChange={(e) => { setSelectedClub(e.target.value); setSearchParams({ club: e.target.value }) }}
@@ -726,8 +1181,8 @@ export default function ClubDashboard() {
               ? <CarryRangeCard p10={carryPercentiles.p10} p50={carryPercentiles.p50} p90={carryPercentiles.p90} />
               : <StatCard label="Carry Avg" value={`${n(stats.carry_mean)} yds`} />
             }
-            <StatCard label="Ball Speed" value={`${n(stats.ball_speed_mean)} mph`} />
-            <StatCard label="Club Speed" value={`${n(stats.club_speed_mean)} mph`} />
+            <StatCard label={adjusted ? '~Ball Speed' : 'Ball Speed'} value={`${n(adjusted ? (stats.ball_speed_mean_adj ?? stats.ball_speed_mean) : stats.ball_speed_mean)} mph`} />
+            <StatCard label={adjusted ? '~Club Speed' : 'Club Speed'} value={`${n(adjusted ? (stats.club_speed_mean_adj ?? stats.club_speed_mean) : stats.club_speed_mean)} mph`} />
             <StatCard label="Smash Factor" value={n(stats.smash_factor_mean, 2)} />
             <MissCard mean={stats.side_carry_mean} std={stats.side_carry_std} />
             <StatCard label="Spin Rate" value={stats.spin_rate_mean != null ? `${Math.round(stats.spin_rate_mean).toLocaleString()} rpm` : '—'} />
@@ -855,123 +1310,12 @@ export default function ClubDashboard() {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Sessions chart */}
-        <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-white font-semibold">Sessions</h2>
-            <select
-              value={metric}
-              onChange={(e) => setMetric(e.target.value)}
-              className="bg-slate-800 text-white rounded px-2 py-1 text-xs border border-slate-600"
-            >
-              {TREND_METRICS.map((m) => (
-                <option key={m.key} value={m.key}>{m.label}</option>
-              ))}
-            </select>
-          </div>
-          <p className="text-slate-500 text-xs mb-3">
-            <span className="text-green-400">—</span>{' '}
-            {TREND_METRICS.find((m) => m.key === metric)?.label ?? metric}
-            &nbsp;·&nbsp; shaded band = ±1 std dev
-            {speedTrend.length > 0 && (
-              <>&nbsp;·&nbsp;<span className="text-sky-400">— — —</span> club speed (right axis)</>
-            )}
-          </p>
-          <ResponsiveContainer width="100%" height={260}>
-            <ComposedChart data={trendWithBands} margin={{ top: 4, right: 48, bottom: 4, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="session_date" tickFormatter={fmtDate} tick={{ fill: '#94a3b8', fontSize: 11 }} />
-              <YAxis yAxisId="left" tick={{ fill: '#94a3b8', fontSize: 11 }} domain={['auto', 'auto']} />
-              {speedTrend.length > 0 && (
-                <YAxis
-                  yAxisId="right"
-                  orientation="right"
-                  tick={{ fill: '#60a5fa', fontSize: 10 }}
-                  domain={['auto', 'auto']}
-                  width={40}
-                  label={{ value: 'mph', position: 'insideRight', fill: '#60a5fa', fontSize: 10, offset: 8 }}
-                />
-              )}
-              <Tooltip
-                contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6 }}
-                labelStyle={{ color: '#94a3b8' }}
-                labelFormatter={(d) => fmtDate(String(d))}
-                content={({ active, payload, label }) => {
-                  if (!active || !payload?.length) return null
-                  const d = payload[0]?.payload as typeof trendWithBands[0] | undefined
-                  if (!d) return null
-                  const metricLabel = TREND_METRICS.find((m) => m.key === metric)?.label ?? metric
-                  return (
-                    <div style={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6, padding: '8px 12px', fontSize: 12 }}>
-                      <div className="text-slate-400 mb-1">{fmtDate(String(label))}</div>
-                      <div className="text-slate-300">
-                        {metricLabel}: <span className="text-white font-medium">{d.mean.toFixed(1)}</span>
-                        {d.std != null && d.std > 0 && <span className="text-slate-500"> ±{d.std.toFixed(1)}</span>}
-                      </div>
-                      {d.speed_mean != null && (
-                        <div className="text-slate-300 mt-0.5">
-                          Club speed: <span className="text-sky-300 font-medium">{d.speed_mean.toFixed(1)} mph</span>
-                          {d.speed_min != null && d.speed_max != null && (
-                            <span className="text-slate-500"> ({d.speed_min.toFixed(0)}–{d.speed_max.toFixed(0)})</span>
-                          )}
-                        </div>
-                      )}
-                      <div className="text-slate-500 mt-0.5">{d.shot_count} shots</div>
-                    </div>
-                  )
-                }}
-              />
-              {/* ±1σ shading band via stacked transparent base + colored fill */}
-              <Area
-                yAxisId="left"
-                type="monotone"
-                dataKey="lower"
-                fill="transparent"
-                stroke="none"
-                stackId="band"
-                legendType="none"
-                isAnimationActive={false}
-              />
-              <Area
-                yAxisId="left"
-                type="monotone"
-                dataKey="bandWidth"
-                fill="#4ade80"
-                fillOpacity={0.12}
-                stroke="none"
-                stackId="band"
-                legendType="none"
-                isAnimationActive={false}
-              />
-              {/* Main metric line */}
-              <Line
-                yAxisId="left"
-                type="monotone"
-                dataKey="mean"
-                stroke="#4ade80"
-                strokeWidth={2}
-                dot={{ r: 4, fill: '#4ade80' }}
-                activeDot={{ r: 6 }}
-                legendType="none"
-              />
-              {/* Club speed on right axis */}
-              {speedTrend.length > 0 && (
-                <Line
-                  yAxisId="right"
-                  type="monotone"
-                  dataKey="speed_mean"
-                  stroke="#60a5fa"
-                  strokeWidth={1.5}
-                  strokeDasharray="5 3"
-                  dot={{ r: 3, fill: '#60a5fa' }}
-                  activeDot={{ r: 5 }}
-                  connectNulls
-                  legendType="none"
-                  isAnimationActive={false}
-                />
-              )}
-            </ComposedChart>
-          </ResponsiveContainer>
-        </div>
+        <SessionsTrendChart
+          trendWithBands={trendWithBands}
+          speedTrend={speedTrend}
+          metric={metric}
+          onMetricChange={handleMetricChange}
+        />
 
         {/* Dispersion chart */}
         <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
@@ -1028,299 +1372,69 @@ export default function ClubDashboard() {
       </div>
 
       {/* Dispersion by swing effort */}
-      {effortDisp.length >= 2 && (
-        <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
-          <div className="mb-4">
-            <h2 className="text-white font-semibold">Dispersion by Swing Effort</h2>
-            <p className="text-slate-500 text-xs mt-1">80% confidence ellipse per effort level · outliers excluded</p>
-            {(() => {
-              const lowest = effortDisp[0]
-              const highest = effortDisp[effortDisp.length - 1]
-              if (!lowest?.ellipse || !highest?.ellipse) return null
-              const deltaCarry = highest.ellipse.cy - lowest.ellipse.cy
-              const dispersalRatio = lowest.ellipse.rx > 0.1 ? highest.ellipse.rx / lowest.ellipse.rx : null
-              return (
-                <p className="text-slate-400 text-xs mt-1">
-                  {highest.label}: <span className="text-white">{deltaCarry >= 0 ? '+' : ''}{deltaCarry.toFixed(0)} yds carry</span> vs {lowest.label}
-                  {dispersalRatio != null && (
-                    <>, <span className="text-white">{dispersalRatio.toFixed(1)}×</span> lateral spread</>
-                  )}
-                </p>
-              )
-            })()}
-          </div>
-          <div className={`grid gap-4 ${effortDisp.length <= 2 ? 'grid-cols-1 sm:grid-cols-2' : effortDisp.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'}`}>
-            {effortDisp.map(({ effortKey, label, color, pts, ellipse: ell, ellipsePts: ePts, speedMin, speedMax }) => {
-              return (
-                <div key={effortKey} className="bg-slate-800 rounded-lg p-3 border border-slate-700">
-                  <div className="flex items-center justify-between mb-2">
-                    <div>
-                      <span className="text-sm font-semibold" style={{ color }}>{label}</span>
-                      {speedMin != null && speedMax != null && (
-                        <span className="text-slate-400 text-xs ml-2">{speedMin.toFixed(0)}–{speedMax.toFixed(0)} mph</span>
-                      )}
-                    </div>
-                    {ell && (
-                      <span className="text-slate-500 text-xs">{ell.inlierCount}/{pts.length} shots</span>
-                    )}
-                  </div>
-                  <ResponsiveContainer width="100%" height={220}>
-                    <ScatterChart margin={{ top: 4, right: 12, bottom: 20, left: 0 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                      <XAxis
-                        type="number"
-                        dataKey="x"
-                        name="Side Carry"
-                        label={{ value: 'Side (yds)', position: 'bottom', fill: '#94a3b8', fontSize: 10 }}
-                        tick={{ fill: '#94a3b8', fontSize: 10 }}
-                        domain={['auto', 'auto']}
-                      />
-                      <YAxis
-                        type="number"
-                        dataKey="y"
-                        name="Carry"
-                        tick={{ fill: '#94a3b8', fontSize: 10 }}
-                        domain={['auto', 'auto']}
-                        width={38}
-                      />
-                      <Tooltip
-                        cursor={{ strokeDasharray: '3 3' }}
-                        content={({ active, payload }) => {
-                          if (!active || !payload?.length) return null
-                          const d = payload[0].payload as ShotPoint
-                          return (
-                            <div style={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6, padding: '6px 10px', fontSize: 11 }}>
-                              <div className="text-slate-300">Carry: <span className="text-white">{d.y.toFixed(1)} yds</span></div>
-                              <div className="text-slate-300">Side: <span className="text-white">{d.x.toFixed(1)} yds</span></div>
-                              <div className="text-slate-300">Club Speed: <span className="text-white">{d.club_speed != null ? `${d.club_speed.toFixed(1)} mph` : '—'}</span></div>
-                            </div>
-                          )
-                        }}
-                      />
-                      <ReferenceLine x={0} stroke="#475569" />
-                      {ePts.length > 0 && (
-                        <Scatter
-                          data={ePts}
-                          line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                          shape={() => null as unknown as React.ReactElement}
-                          fill="transparent"
-                          isAnimationActive={false}
-                          legendType="none"
-                        />
-                      )}
-                      <Scatter data={pts} fill={color} fillOpacity={0.7} isAnimationActive={false} />
-                    </ScatterChart>
-                  </ResponsiveContainer>
-                </div>
-              )
-            })}
-          </div>
-        </div>
-      )}
+      <EffortDispersionSection effortDisp={effortDisp} />
 
       {/* Dispersion over time */}
-      {dispTrend.length > 1 && (
+      <DispersionTrendChart dispTrend={dispTrend} />
+
+      {/* Carry vs Club Speed */}
+      {speedCarryChart && (
         <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
-          <div className="mb-4">
-            <h2 className="text-white font-semibold">Dispersion Over Time</h2>
-            <p className="text-slate-500 text-xs mt-1">
-              Std dev of carry distance and side carry per session — lower = more consistent
-            </p>
+          <div className="mb-3">
+            <h2 className="text-white font-semibold">Carry vs Club Speed</h2>
+            {speedCarryChart.reg && (
+              <p className="text-slate-500 text-xs mt-0.5">
+                {speedCarryChart.reg.slope.toFixed(1)} yds carry per 1 mph club speed
+                {speedCarryChart.r2 != null && ` · R² = ${speedCarryChart.r2.toFixed(2)}`} · outliers excluded
+              </p>
+            )}
           </div>
-          <ResponsiveContainer width="100%" height={240}>
-            <LineChart data={dispTrend} margin={{ top: 4, right: 16, bottom: 4, left: 0 }}>
+          <ResponsiveContainer width="100%" height={260}>
+            <ScatterChart margin={{ top: 4, right: 16, bottom: 20, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-              <XAxis dataKey="session_date" tickFormatter={fmtDate} tick={{ fill: '#94a3b8', fontSize: 11 }} />
-              <YAxis
+              <XAxis
+                type="number"
+                dataKey="x"
+                name="Club Speed"
+                label={{ value: 'Club Speed (mph)', position: 'bottom', fill: '#94a3b8', fontSize: 11 }}
                 tick={{ fill: '#94a3b8', fontSize: 11 }}
-                domain={[0, 'auto']}
-                label={{ value: 'Std Dev (yds)', angle: -90, position: 'insideLeft', fill: '#94a3b8', fontSize: 11 }}
+                domain={['auto', 'auto']}
+              />
+              <YAxis
+                type="number"
+                dataKey="y"
+                name="Carry"
+                label={{ value: 'Carry (yds)', angle: -90, position: 'insideLeft', fill: '#94a3b8', fontSize: 11 }}
+                tick={{ fill: '#94a3b8', fontSize: 11 }}
+                domain={['auto', 'auto']}
               />
               <Tooltip
+                cursor={{ strokeDasharray: '3 3' }}
                 contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6 }}
-                labelStyle={{ color: '#94a3b8' }}
-                itemStyle={{ color: '#fff' }}
-                labelFormatter={(d) => fmtDate(String(d))}
                 formatter={(v, name) => [
-                  v != null ? `±${Number(v).toFixed(1)} yds` : '—',
-                  name === 'carry_std' ? 'Carry Std Dev' : 'Side Carry Std Dev',
+                  `${Number(v).toFixed(1)}${name === 'Club Speed' ? ' mph' : ' yds'}`,
+                  name,
                 ]}
               />
-              <Legend
-                formatter={(value: string) =>
-                  value === 'carry_std' ? 'Carry Std Dev' : 'Side Carry Std Dev'
-                }
-                wrapperStyle={{ color: '#94a3b8', fontSize: 12 }}
-              />
-              <Line
-                type="monotone"
-                dataKey="carry_std"
-                stroke="#4ade80"
-                strokeWidth={2}
-                dot={{ r: 3, fill: '#4ade80' }}
-                connectNulls
-                isAnimationActive={false}
-              />
-              <Line
-                type="monotone"
-                dataKey="side_std"
-                stroke="#60a5fa"
-                strokeWidth={2}
-                dot={{ r: 3, fill: '#60a5fa' }}
-                connectNulls
-                isAnimationActive={false}
-              />
-            </LineChart>
+              {speedCarryChart.regLinePts.length > 0 && (
+                <Scatter
+                  data={speedCarryChart.regLinePts}
+                  line={{ stroke: '#f59e0b', strokeWidth: 2 }}
+                  shape={() => null as unknown as React.ReactElement}
+                  fill="transparent"
+                  isAnimationActive={false}
+                  legendType="none"
+                  name="fit"
+                />
+              )}
+              <Scatter data={speedCarryChart.speedCarryPts} fill="#4ade80" fillOpacity={0.7} isAnimationActive={false} name="shots" />
+            </ScatterChart>
           </ResponsiveContainer>
         </div>
       )}
 
-      {/* Carry vs Club Speed */}
-      {(() => {
-        const speedCarryPts = viewShots
-          .filter((s) => s.club_speed != null && s.carry_distance != null && !s.is_outlier)
-          .map((s) => ({ x: s.club_speed!, y: s.carry_distance! }))
-        if (speedCarryPts.length < 3) return null
-        const reg = linearRegression(speedCarryPts)
-        const xs = speedCarryPts.map((p) => p.x)
-        const minX = Math.min(...xs)
-        const maxX = Math.max(...xs)
-        const regLinePts = reg
-          ? [{ x: minX, y: reg.slope * minX + reg.intercept }, { x: maxX, y: reg.slope * maxX + reg.intercept }]
-          : []
-        const r2 = reg ? rSquared(speedCarryPts, reg.slope, reg.intercept) : null
-        return (
-          <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
-            <div className="mb-3">
-              <h2 className="text-white font-semibold">Carry vs Club Speed</h2>
-              {reg && (
-                <p className="text-slate-500 text-xs mt-0.5">
-                  {reg.slope.toFixed(1)} yds carry per 1 mph club speed
-                  {r2 != null && ` · R² = ${r2.toFixed(2)}`} · outliers excluded
-                </p>
-              )}
-            </div>
-            <ResponsiveContainer width="100%" height={260}>
-              <ScatterChart margin={{ top: 4, right: 16, bottom: 20, left: 0 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                <XAxis
-                  type="number"
-                  dataKey="x"
-                  name="Club Speed"
-                  label={{ value: 'Club Speed (mph)', position: 'bottom', fill: '#94a3b8', fontSize: 11 }}
-                  tick={{ fill: '#94a3b8', fontSize: 11 }}
-                  domain={['auto', 'auto']}
-                />
-                <YAxis
-                  type="number"
-                  dataKey="y"
-                  name="Carry"
-                  label={{ value: 'Carry (yds)', angle: -90, position: 'insideLeft', fill: '#94a3b8', fontSize: 11 }}
-                  tick={{ fill: '#94a3b8', fontSize: 11 }}
-                  domain={['auto', 'auto']}
-                />
-                <Tooltip
-                  cursor={{ strokeDasharray: '3 3' }}
-                  contentStyle={{ background: '#1e293b', border: '1px solid #475569', borderRadius: 6 }}
-                  formatter={(v, name) => [
-                    `${Number(v).toFixed(1)}${name === 'Club Speed' ? ' mph' : ' yds'}`,
-                    name,
-                  ]}
-                />
-                {regLinePts.length > 0 && (
-                  <Scatter
-                    data={regLinePts}
-                    line={{ stroke: '#f59e0b', strokeWidth: 2 }}
-                    shape={() => null as unknown as React.ReactElement}
-                    fill="transparent"
-                    isAnimationActive={false}
-                    legendType="none"
-                    name="fit"
-                  />
-                )}
-                <Scatter data={speedCarryPts} fill="#4ade80" fillOpacity={0.7} isAnimationActive={false} name="shots" />
-              </ScatterChart>
-            </ResponsiveContainer>
-          </div>
-        )
-      })()}
-
       {/* Stopping power by swing effort */}
-      {viewShots.some(s => s.roll_medium_standard != null) && (() => {
-        const totalBuckets = clubBuckets.length
-        const effortKeys = [...new Set(viewShots.map(s => s.swing_effort).filter((e): e is string => e != null && e !== 'unknown'))]
-          .sort((a, b) => parseInt(a) - parseInt(b))
-        const effortRows = effortKeys.flatMap((effortKey) => {
-          const group = viewShots.filter(s => s.swing_effort === effortKey && !s.is_outlier && s.roll_medium_standard != null)
-          if (group.length === 0) return []
-          const avg = (arr: (number | null)[]) => {
-            const vals = arr.filter((v): v is number => v != null)
-            return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null
-          }
-          const bucketIdx = parseInt(effortKey)
-          const label = clubBuckets.find((b) => b.bucket_index === bucketIdx)?.label ?? `Bucket ${effortKey}`
-          return [{
-            effortKey,
-            label,
-            color: bucketColor(bucketIdx, totalBuckets || effortKeys.length),
-            n: group.length,
-            rollStd: avg(group.map(s => s.roll_medium_standard)),
-            rollFly: avg(group.map(s => s.roll_medium_flyer)),
-            flyCarry: avg(group.map(s => s.flyer_carry_est)),
-            carry: avg(group.map(s => s.carry_distance)),
-          }]
-        })
-        if (effortRows.length === 0) return null
-        return (
-          <div className="mt-6 bg-slate-900 rounded-lg border border-slate-700">
-            <div className="px-4 py-3 border-b border-slate-700">
-              <h2 className="text-white font-semibold">Stopping Power by Swing Effort</h2>
-              <p className="text-slate-500 text-xs mt-0.5">
-                Roll and carry estimates on medium greens · outliers excluded
-              </p>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-800 text-slate-400 text-left">
-                  <tr>
-                    <th className="px-4 py-2">Effort</th>
-                    <th className="px-4 py-2 text-right">Shots</th>
-                    <th className="px-4 py-2 text-right">Carry (yds)</th>
-                    <th className="px-4 py-2 text-right">Roll · Std Lie (ft)</th>
-                    <th className="px-4 py-2 text-right">Roll · Flyer Lie (ft)</th>
-                    <th className="px-4 py-2 text-right">Flyer Carry Est (yds)</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {effortRows.map((row, i) => (
-                    <tr
-                      key={row.effortKey}
-                      className={i % 2 === 0 ? 'bg-slate-900 text-slate-200' : 'bg-slate-950 text-slate-200'}
-                    >
-                      <td className="px-4 py-2 font-semibold" style={{ color: row.color }}>
-                        {row.label}
-                      </td>
-                      <td className="px-4 py-2 text-right text-slate-400">{row.n}</td>
-                      <td className="px-4 py-2 text-right">{n(row.carry)}</td>
-                      <td className="px-4 py-2 text-right">
-                        <span className={row.rollStd != null && row.rollStd < 0 ? 'text-cyan-400' : ''}>
-                          {row.rollStd != null ? (row.rollStd >= 0 ? '+' : '') + n(row.rollStd) : '—'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2 text-right text-amber-300">
-                        {row.rollFly != null ? '+' + n(row.rollFly) : '—'}
-                      </td>
-                      <td className="px-4 py-2 text-right text-amber-300">
-                        {n(row.flyCarry)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )
-      })()}
+      <StoppingPowerTable viewShots={viewShots} clubBuckets={clubBuckets} />
 
       {/* Shot log */}
       {filteredShots.length > 0 && (
@@ -1343,10 +1457,10 @@ export default function ClubDashboard() {
                     { key: 'session_date', label: 'Date' },
                     { key: 'session_id', label: 'Session' },
                     { key: 'shot_number', label: '#' },
-                    { key: 'carry_distance', label: 'Carry' },
-                    { key: 'total_distance', label: 'Total' },
-                    { key: 'ball_speed', label: 'Ball Spd' },
-                    { key: 'club_speed', label: 'Club Spd' },
+                    { key: 'carry_distance', label: adjusted ? '~Carry' : 'Carry' },
+                    { key: 'total_distance', label: adjusted ? '~Total' : 'Total' },
+                    { key: 'ball_speed', label: adjusted ? '~Ball Spd' : 'Ball Spd' },
+                    { key: 'club_speed', label: adjusted ? '~Club Spd' : 'Club Spd' },
                     { key: 'smash_factor', label: 'Smash' },
                     { key: 'launch_angle', label: 'Launch' },
                     { key: 'launch_direction', label: 'Dir.' },
@@ -1390,10 +1504,10 @@ export default function ClubDashboard() {
                     </td>
                     <td className="px-3 py-1.5 text-slate-500 font-mono text-xs">{s.session_id.slice(0, 8)}</td>
                     <td className="px-3 py-1.5 text-slate-400">{s.shot_number}</td>
-                    <td className="px-3 py-1.5 text-right">{n(s.carry_distance)} yds</td>
-                    <td className="px-3 py-1.5 text-right">{n(s.total_distance)} yds</td>
-                    <td className="px-3 py-1.5 text-right">{n(s.ball_speed)} mph</td>
-                    <td className="px-3 py-1.5 text-right">{n(s.club_speed)} mph</td>
+                    <td className="px-3 py-1.5 text-right">{n(adjusted ? (s.carry_distance_adj ?? s.carry_distance) : s.carry_distance)} yds</td>
+                    <td className="px-3 py-1.5 text-right">{n(adjusted ? (s.total_distance_adj ?? s.total_distance) : s.total_distance)} yds</td>
+                    <td className="px-3 py-1.5 text-right">{n(adjusted ? (s.ball_speed_adj ?? s.ball_speed) : s.ball_speed)} mph</td>
+                    <td className="px-3 py-1.5 text-right">{n(adjusted ? (s.club_speed_adj ?? s.club_speed) : s.club_speed)} mph</td>
                     <td className="px-3 py-1.5 text-right">{n(s.smash_factor, 2)}</td>
                     <td className="px-3 py-1.5 text-right">{n(s.launch_angle)}°</td>
                     <td className="px-3 py-1.5 text-right">{n(s.launch_direction)}°</td>
@@ -1458,6 +1572,8 @@ export default function ClubDashboard() {
           </div>}
         </div>
       )}
+      {/* Note: trend chart data comes from the API in raw space; correcting it would require API changes */}
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

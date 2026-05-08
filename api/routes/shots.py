@@ -1,7 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from __future__ import annotations
+
 from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+
 from api.db import get_conn
-from api.models import Shot, OutlierUpdate
+from api.models import CorrectedShot, OutlierUpdate, Shot
 
 router = APIRouter(prefix="/shots", tags=["shots"])
 
@@ -12,21 +16,22 @@ SHOT_COLS = [
     "smash_factor", "carry_distance", "total_distance", "side_carry", "apex",
     "descent_angle", "club_speed", "attack_angle", "club_path", "swing_effort",
     "roll_medium_standard", "roll_medium_flyer", "flyer_carry_est",
+    "ball_speed_adj", "club_speed_adj", "carry_distance_adj",
+    "total_distance_adj", "smash_factor_adj",
 ]
 
 
-@router.get("/session/{session_id}", response_model=list[Shot])
-def get_shots_for_session(session_id: str):
+@router.get("/session/{session_id}", response_model=list[CorrectedShot])
+def get_shots_for_session(session_id: str) -> list[CorrectedShot]:
     conn = get_conn()
     rows = conn.execute(
         f"SELECT {', '.join(SHOT_COLS)} FROM shots WHERE session_id = ? ORDER BY shot_number",
         [session_id],
     ).fetchall()
+    return [CorrectedShot(**dict(zip(SHOT_COLS, r))) for r in rows]
 
-    return [Shot(**dict(zip(SHOT_COLS, r))) for r in rows]
 
-
-@router.get("/club/{club_type}", response_model=list[Shot])
+@router.get("/club/{club_type}", response_model=list[CorrectedShot])
 def get_shots_by_club(
     club_type: str,
     include_outliers: bool = False,
@@ -35,7 +40,7 @@ def get_shots_by_club(
     effort: Optional[str] = None,
     disabled_clubs: Optional[str] = None,
     limit_sessions: Optional[int] = None,
-):
+) -> list[CorrectedShot]:
     conn = get_conn()
     conditions = ["sh.club_type = ?"]
     params: list = [club_type]
@@ -76,7 +81,7 @@ def get_shots_by_club(
     ).fetchall()
 
     cols = SHOT_COLS + ["session_date"]
-    return [Shot(**dict(zip(cols, r))) for r in rows]
+    return [CorrectedShot(**dict(zip(cols, r))) for r in rows]
 
 
 @router.patch("/{shot_id}/outlier")

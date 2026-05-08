@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { api } from '../api'
-import type { MatrixRow } from '../api'
+import type { MatrixRow, UserSettings } from '../api'
 import { useBag } from '../BagContext'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 const BUCKET_PALETTE = ['#f87171', '#fb923c', '#facc15', '#a3e635', '#34d399', '#22d3ee', '#60a5fa', '#818cf8']
 
@@ -47,6 +48,11 @@ export default function WedgeMatrix() {
   const [showAll, setShowAll] = useState(false)
   const [findYardage, setFindYardage] = useState<number | null>(null)
   const { disabledClubs } = useBag()
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   useEffect(() => {
     const params: Record<string, string> = {}
@@ -230,6 +236,7 @@ export default function WedgeMatrix() {
           </table>
         </div>
       )}
+      <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />
     </div>
   )
 }

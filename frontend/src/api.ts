@@ -37,6 +37,11 @@ export interface Shot {
   roll_medium_standard: number | null
   roll_medium_flyer: number | null
   flyer_carry_est: number | null
+  ball_speed_adj: number | null
+  club_speed_adj: number | null
+  carry_distance_adj: number | null
+  total_distance_adj: number | null
+  smash_factor_adj: number | null
 }
 
 export interface ClubStats {
@@ -59,6 +64,15 @@ export interface ClubStats {
   attack_angle_mean: number | null
   launch_direction_mean: number | null
   apex_mean: number | null
+  carry_mean_adj: number | null
+  total_mean_adj: number | null
+  ball_speed_mean_adj: number | null
+  club_speed_mean_adj: number | null
+}
+
+export interface UserSettings {
+  elevation_ft: number
+  temperature_f: number
 }
 
 export interface TrendPoint {
@@ -113,6 +127,7 @@ export interface MatrixBucket {
   side_carry_std: number | null
   apex_mean: number | null
   speed_mean: number | null
+  ball_speed_mean: number | null
   spin_rate_mean: number | null
   smash_factor_mean: number | null
   attack_angle_mean: number | null
@@ -239,6 +254,13 @@ export const api = {
   speedHistogram: (clubType: string, disabledClubs?: string) =>
     get<SpeedHistogram>(`/swing-effort/histogram/${clubType}`, disabledClubs ? { disabled_clubs: disabledClubs } : undefined),
   wedgeMatrix: (params?: Record<string, string>) => get<MatrixRow[]>('/swing-effort/matrix', params),
+  getSettings: () => get<UserSettings>('/settings'),
+  updateSettings: (body: Partial<UserSettings>) =>
+    fetch(`${BASE}/settings`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then((r) => r.json() as Promise<UserSettings>),
   updateOutlier: (shotId: string, isOutlier: boolean, note?: string) =>
     fetch(`${BASE}/shots/${encodeURIComponent(shotId)}/outlier`, {
       method: 'PATCH',

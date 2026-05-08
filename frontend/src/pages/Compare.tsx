@@ -4,7 +4,10 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { api } from '../api'
-import type { Shot, GtShot, Session } from '../api'
+import type { Shot, GtShot, Session, UserSettings } from '../api'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 // ── Ellipse helpers (80% confidence, chi²(2,0.80) ≈ 3.219) ─────────────────
 
@@ -118,15 +121,16 @@ function toOnCoursePts(shots: GtShot[], avgDist: number): DispPt[] {
     }))
 }
 
-function toRapsodoPts(shots: Shot[], avgTotal: number, sessionMap: Map<string, Session>): DispPt[] {
+function toRapsodoPts(shots: Shot[], avgTotal: number, sessionMap: Map<string, Session>, adjusted: boolean): DispPt[] {
   return shots
     .filter((s) => s.side_carry != null && s.total_distance != null)
     .map((s) => {
       const session = sessionMap.get(s.session_id)
+      const dist = adjusted ? (s.total_distance_adj ?? s.total_distance!) : s.total_distance!
       return {
         x: s.side_carry!,
-        y: s.total_distance! - avgTotal,
-        distance: s.total_distance!,
+        y: dist - avgTotal,
+        distance: dist,
         date: session?.session_date ?? null,
         meta: session?.session_type ?? null,
         outcome: null,
@@ -351,6 +355,12 @@ export default function Compare() {
   const [onCourseShots, setOnCourseShots] = useState<GtShot[]>([])
   const [sessionMap, setSessionMap] = useState<Map<string, Session>>(new Map())
   const [allClubShots, setAllClubShots] = useState<Map<string, GtShot[]>>(new Map())
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   useEffect(() => {
     api.sessions().then((sessions) => {
@@ -389,7 +399,7 @@ export default function Compare() {
 
   const totalDistShots = filteredRapsodo.filter((s) => s.total_distance != null)
   const avgTotal = totalDistShots.length
-    ? totalDistShots.reduce((sum, s) => sum + s.total_distance!, 0) / totalDistShots.length
+    ? totalDistShots.reduce((sum, s) => sum + (adjusted ? (s.total_distance_adj ?? s.total_distance!) : s.total_distance!), 0) / totalDistShots.length
     : 0
 
   const distTraveledShots = filteredOnCourse.filter((s) => s.distance_traveled != null)
@@ -397,7 +407,7 @@ export default function Compare() {
     ? distTraveledShots.reduce((sum, s) => sum + s.distance_traveled!, 0) / distTraveledShots.length
     : 0
 
-  const rapsodoPts = toRapsodoPts(filteredRapsodo, avgTotal, sessionMap)
+  const rapsodoPts = toRapsodoPts(filteredRapsodo, avgTotal, sessionMap, adjusted)
   const onCoursePts = toOnCoursePts(filteredOnCourse, avgDist)
 
   const allVals = [
@@ -425,6 +435,7 @@ export default function Compare() {
     <div>
       <div className="flex items-center gap-4 mb-2 flex-wrap">
         <h1 className="text-2xl font-bold text-white">Dispersion Comparison</h1>
+        <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
         <select
           value={selectedClub}
           onChange={(e) => setSelectedClub(e.target.value)}
@@ -494,6 +505,7 @@ export default function Compare() {
           axisMax={axisMax}
         />
       </div>
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

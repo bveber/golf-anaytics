@@ -1,6 +1,9 @@
-from pydantic import BaseModel
-from typing import Optional
+from __future__ import annotations
+
 from datetime import datetime
+from typing import Optional
+
+from pydantic import BaseModel
 
 
 class Session(BaseModel):
@@ -42,9 +45,22 @@ class Shot(BaseModel):
     flyer_carry_est: Optional[float] = None
 
 
+class CorrectedShot(Shot):
+    ball_speed_adj:     Optional[float] = None
+    club_speed_adj:     Optional[float] = None
+    carry_distance_adj: Optional[float] = None
+    total_distance_adj: Optional[float] = None
+    smash_factor_adj:   Optional[float] = None
+
+
 class OutlierUpdate(BaseModel):
     is_outlier: bool
     outlier_note: Optional[str] = None
+
+
+class UserSettings(BaseModel):
+    elevation_ft:  float
+    temperature_f: float
 
 
 class ClubStats(BaseModel):
@@ -67,3 +83,7 @@ class ClubStats(BaseModel):
     attack_angle_mean: Optional[float]
     launch_direction_mean: Optional[float]
     apex_mean: Optional[float]
+    carry_mean_adj:      Optional[float] = None
+    total_mean_adj:      Optional[float] = None
+    ball_speed_mean_adj: Optional[float] = None
+    club_speed_mean_adj: Optional[float] = None

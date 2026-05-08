@@ -4,8 +4,11 @@ import {
   ResponsiveContainer, Cell, Line,
 } from 'recharts'
 import { api } from '../api'
-import type { SwingEffortThreshold, SwingEffortBucket, SpeedHistogram } from '../api'
+import type { SwingEffortThreshold, SwingEffortBucket, SpeedHistogram, UserSettings } from '../api'
 import { useBag } from '../BagContext'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 interface CalibrateOneResult {
   club_type: string
@@ -294,8 +297,14 @@ export default function SwingEffort() {
   const [diffRows, setDiffRows] = useState<DiffRow[] | null>(null)
   const [preCalibrationThresholds, setPreCalibrationThresholds] = useState<SwingEffortThreshold[]>([])
   const { disabledClubs } = useBag()
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
 
   const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   const load = () => {
     api.swingEffortThresholds(disabledParam).then(setThresholds).catch(() => setError('Failed to load thresholds'))
@@ -445,7 +454,10 @@ export default function SwingEffort() {
         />
       )}
       <div className="flex items-center justify-between mb-2">
-        <h1 className="text-2xl font-bold text-white">Swing Effort</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-white">Swing Effort</h1>
+          <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
+        </div>
         <button
           onClick={handleCalibrate}
           disabled={calibrating}
@@ -580,6 +592,7 @@ export default function SwingEffort() {
           )}
         </>
       )}
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }
