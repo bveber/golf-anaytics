@@ -5,7 +5,10 @@ import {
   ReferenceLine, ResponsiveContainer,
 } from 'recharts'
 import { api } from '../api'
-import type { Session, ClubStats, Shot } from '../api'
+import type { Session, ClubStats, Shot, UserSettings } from '../api'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 // ── PCA / ellipse helpers ──────────────────────────────────────────────────
 
@@ -84,20 +87,20 @@ function ellipseOutlinePoints(e: Ellipse, n = 72): Point[] {
 
 // ── Metrics ────────────────────────────────────────────────────────────────
 
-const METRICS: { key: keyof Shot; label: string; unit: string }[] = [
-  { key: 'carry_distance', label: 'Carry', unit: 'yds' },
-  { key: 'total_distance', label: 'Total', unit: 'yds' },
-  { key: 'ball_speed', label: 'Ball Speed', unit: 'mph' },
-  { key: 'club_speed', label: 'Club Speed', unit: 'mph' },
-  { key: 'smash_factor', label: 'Smash', unit: '' },
-  { key: 'launch_angle', label: 'Launch Ang.', unit: '°' },
-  { key: 'launch_direction', label: 'Launch Dir.', unit: '°' },
-  { key: 'spin_rate', label: 'Spin', unit: 'rpm' },
-  { key: 'spin_axis', label: 'Spin Axis', unit: '°' },
-  { key: 'side_carry', label: 'Side Carry', unit: 'yds' },
-  { key: 'apex', label: 'Apex', unit: 'yds' },
-  { key: 'attack_angle', label: 'Attack Ang.', unit: '°' },
-  { key: 'club_path', label: 'Club Path', unit: '°' },
+const BASE_METRICS: { key: keyof Shot; adjKey: keyof Shot | null; label: string; adjLabel: string; unit: string }[] = [
+  { key: 'carry_distance', adjKey: 'carry_distance_adj', label: 'Carry', adjLabel: '~Carry', unit: 'yds' },
+  { key: 'total_distance', adjKey: 'total_distance_adj', label: 'Total', adjLabel: '~Total', unit: 'yds' },
+  { key: 'ball_speed', adjKey: 'ball_speed_adj', label: 'Ball Speed', adjLabel: '~Ball Speed', unit: 'mph' },
+  { key: 'club_speed', adjKey: 'club_speed_adj', label: 'Club Speed', adjLabel: '~Club Speed', unit: 'mph' },
+  { key: 'smash_factor', adjKey: null, label: 'Smash', adjLabel: 'Smash', unit: '' },
+  { key: 'launch_angle', adjKey: null, label: 'Launch Ang.', adjLabel: 'Launch Ang.', unit: '°' },
+  { key: 'launch_direction', adjKey: null, label: 'Launch Dir.', adjLabel: 'Launch Dir.', unit: '°' },
+  { key: 'spin_rate', adjKey: null, label: 'Spin', adjLabel: 'Spin', unit: 'rpm' },
+  { key: 'spin_axis', adjKey: null, label: 'Spin Axis', adjLabel: 'Spin Axis', unit: '°' },
+  { key: 'side_carry', adjKey: null, label: 'Side Carry', adjLabel: 'Side Carry', unit: 'yds' },
+  { key: 'apex', adjKey: null, label: 'Apex', adjLabel: 'Apex', unit: 'yds' },
+  { key: 'attack_angle', adjKey: null, label: 'Attack Ang.', adjLabel: 'Attack Ang.', unit: '°' },
+  { key: 'club_path', adjKey: null, label: 'Club Path', adjLabel: 'Club Path', unit: '°' },
 ]
 
 function fmtShot(v: number | null, unit: string) {
@@ -184,6 +187,8 @@ export default function SessionClubs() {
   const [clubs, setClubs] = useState<ClubStats[]>([])
   const [sessionShots, setSessionShots] = useState<Shot[]>([])
   const [loading, setLoading] = useState(true)
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
 
   const [clubSort, setClubSort] = useState<SortState>({ key: 'carry_mean', dir: 'desc' })
   const [editing, setEditing] = useState<string | null>(null)
@@ -211,6 +216,10 @@ export default function SessionClubs() {
   const [historicalStats, setHistoricalStats] = useState<ClubStats | null>(null)
   const [loadingDispersion, setLoadingDispersion] = useState(false)
   const [distanceMetric, setDistanceMetric] = useState<'carry' | 'total'>('carry')
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   useEffect(() => {
     if (!id) return
@@ -262,7 +271,12 @@ export default function SessionClubs() {
     : '—'
 
   // Dispersion data for selected club
-  const yVal = (s: Shot) => distanceMetric === 'total' ? s.total_distance : s.carry_distance
+  const yVal = (s: Shot) => {
+    if (distanceMetric === 'total') {
+      return adjusted ? (s.total_distance_adj ?? s.total_distance) : s.total_distance
+    }
+    return adjusted ? (s.carry_distance_adj ?? s.carry_distance) : s.carry_distance
+  }
 
   const sessionPts: Point[] = selectedClubType
     ? sessionShots
@@ -324,6 +338,7 @@ export default function SessionClubs() {
             </Link>
           </div>
         </div>
+        <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
       </div>
 
       {loading ? (
@@ -342,8 +357,8 @@ export default function SessionClubs() {
                     { key: 'shot_count', label: 'Shots', center: true },
                     { key: 'carry_mean', label: 'Carry (yds)', center: true },
                     { key: 'carry_std', label: 'Carry Std', center: true },
-                    { key: 'ball_speed_mean', label: 'Ball Speed', center: true },
-                    { key: 'club_speed_mean', label: 'Club Speed', center: true },
+                    { key: 'ball_speed_mean', label: adjusted ? '~Ball Speed' : 'Ball Speed', center: true },
+                    { key: 'club_speed_mean', label: adjusted ? '~Club Speed' : 'Club Speed', center: true },
                     { key: 'smash_factor_mean', label: 'Smash', center: true },
                     { key: 'spin_rate_mean', label: 'Spin (rpm)', center: true },
                     { key: 'launch_angle_mean', label: 'Launch Ang.', center: true },
@@ -387,8 +402,8 @@ export default function SessionClubs() {
                         )}
                       </td>
                       <StatCell value={c.carry_std} />
-                      <StatCell value={c.ball_speed_mean} unit=" mph" />
-                      <StatCell value={c.club_speed_mean} unit=" mph" />
+                      <StatCell value={adjusted ? (c.ball_speed_mean_adj ?? c.ball_speed_mean) : c.ball_speed_mean} unit=" mph" />
+                      <StatCell value={adjusted ? (c.club_speed_mean_adj ?? c.club_speed_mean) : c.club_speed_mean} unit=" mph" />
                       <td className="px-4 py-3 text-center">
                         {c.smash_factor_mean != null ? (
                           <span
@@ -591,8 +606,8 @@ export default function SessionClubs() {
                   <tr>
                     <th className="px-3 py-2">#</th>
                     <th className="px-3 py-2">Club</th>
-                    {METRICS.map((m) => (
-                      <th key={m.key} className="px-3 py-2 whitespace-nowrap">{m.label}</th>
+                    {BASE_METRICS.map((m) => (
+                      <th key={m.key} className="px-3 py-2 whitespace-nowrap">{adjusted ? m.adjLabel : m.label}</th>
                     ))}
                     <th className="px-3 py-2">Outlier</th>
                     <th className="px-3 py-2">Note</th>
@@ -614,11 +629,16 @@ export default function SessionClubs() {
                       >
                         <td className="px-3 py-1.5 text-slate-500">{shot.shot_number}</td>
                         <td className="px-3 py-1.5 font-medium whitespace-nowrap">{shot.club_type ?? '—'}</td>
-                        {METRICS.map((m) => (
-                          <td key={m.key} className="px-3 py-1.5 text-right">
-                            {fmtShot(shot[m.key] as number | null, m.unit)}
-                          </td>
-                        ))}
+                        {BASE_METRICS.map((m) => {
+                          const rawVal = shot[m.key] as number | null
+                          const adjVal = m.adjKey ? shot[m.adjKey] as number | null : null
+                          const displayVal = adjusted && m.adjKey ? (adjVal ?? rawVal) : rawVal
+                          return (
+                            <td key={m.key} className="px-3 py-1.5 text-right">
+                              {fmtShot(displayVal, m.unit)}
+                            </td>
+                          )
+                        })}
                         <td className="px-3 py-1.5">
                           <button
                             onClick={() => toggleOutlier(shot)}
@@ -661,6 +681,7 @@ export default function SessionClubs() {
           </div>
         </>
       )}
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

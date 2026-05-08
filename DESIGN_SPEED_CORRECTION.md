@@ -2,29 +2,31 @@
 
 ## Problem
 
-The Rapsodo launch monitor consistently underestimates ball speed and club speed compared to Trackman data. This causes all carry and total distance values to be low. The correction is additive (constant offset per club type group), not a percentage, because the underestimation is roughly consistent across the speed range within each group.
+The Rapsodo launch monitor consistently underestimates ball speed and club speed compared to Trackman data. This causes all carry and total distance values to be low. The correction is a **percentage of the measured clubhead speed**, varying by club type group. A percentage model is more physically appropriate than a fixed additive offset: at partial swing efforts the absolute underestimation is smaller, and a percentage scales with speed automatically.
 
 Raw Rapsodo values are never modified in the database. All corrections are applied at API response time, making this fully reversible.
 
 ---
 
-## Correction Offsets
+## Correction Percentages
 
-Hardcoded in a new module `api/corrections.py`. Values are midpoints of the observed ranges, interpolated for club types without direct Trackman comparisons.
+Hardcoded in a new module `api/corrections.py`. Percentages are derived by anchoring the observed absolute errors on typical full-swing speeds for each club group, then interpolating for club types without direct Trackman comparisons.
 
-| Club Group | Club Types | Club Speed Delta | Ball Speed Delta |
-|---|---|---|---|
-| Driver | `d` | +1.5 mph | +3.0 mph |
-| Fairway Wood | `fw` | +1.25 mph | +2.5 mph |
-| Hybrid | `h`, `2h`, `3h` | +1.25 mph | +2.5 mph |
-| Irons & Wedges | `i`, `w`, `sw`, `pw`, `lw`, `aw` | +1.0 mph | +2.0 mph |
+```
+corrected_club_speed = raw_club_speed × (1 + PCT_CLUB[club_type])
+corrected_ball_speed = raw_ball_speed × (1 + PCT_BALL[club_type])
+```
 
-Any unrecognized `club_type` receives the irons/wedges correction as a conservative default.
+| Club Group | Club Types | Club Speed % | Ball Speed % | Derivation |
+|---|---|---|---|---|
+| Driver | `d` | +1.4% | +2.0% | +1.5 mph / ~105 mph; +3 mph / ~150 mph |
+| Fairway Wood | `fw` | +1.3% | +1.9% | Interpolated between driver and irons |
+| Hybrid | `h`, `2h`, `3h` | +1.3% | +1.9% | Same as fairway wood |
+| Irons & Wedges | `i`, `w`, `sw`, `pw`, `lw`, `aw` | +1.2% | +1.7% | +1 mph / ~85 mph; +2 mph / ~120 mph |
 
-Rationale for midpoints:
-- **Driver**: observed 1–2 mph club speed error, 2–4 mph ball speed error → +1.5 / +3.0
-- **Fairway woods / hybrids**: no direct data; interpolated halfway between driver and irons
-- **Irons & wedges**: directly observed +1.0 / +2.0
+Any unrecognized `club_type` receives the irons/wedges percentages as a conservative default.
+
+**Scaling behaviour**: at a 60% swing effort where a driver produces ~63 mph of club speed, the club speed correction is ~0.9 mph rather than the ~1.5 mph seen at full speed — consistent with how sensor underestimation typically tracks with absolute speed.
 
 ---
 
@@ -36,6 +38,8 @@ Because Rapsodo's own carry values are derived from its underestimated speeds, w
 - Corrected ball speed (mph)
 - Launch angle (degrees)
 - Spin rate (rpm) — raw Rapsodo value, trusted as-is
+- Elevation (ft) — from user settings, default 900 ft
+- Temperature (°F) — from user settings, default 70°F
 
 ### Model
 
@@ -54,8 +58,15 @@ F_lift = 0.5 × ρ × CL × A × v²
 CL = 3.19 × SP     where SP = r × ω / v  (spin parameter)
 ```
 
-**Constants:**
-- Air density ρ = 0.0765 lb/ft³ (sea level, ~70°F)
+**Air density** (computed from user settings on each request):
+```
+ρ = 0.0765 × (519 / (460 + T_F)) × exp(−h_ft / 25000)
+```
+where 0.0765 lb/ft³ is standard sea-level density at 59°F, the first factor is a temperature (Rankine) correction, and the second is a barometric altitude correction.
+
+At the defaults (900 ft, 70°F): ρ ≈ 0.0723 lb/ft³ — about 5.5% thinner than sea-level standard, producing roughly +5% carry vs. a sea-level baseline.
+
+**Fixed constants:**
 - Drag coefficient CD = 0.23
 - Ball mass m = 0.1012 lb
 - Ball radius r = 0.0708 ft (1.68 in diameter)
@@ -88,18 +99,33 @@ If `launch_angle` or `spin_rate` is null for a given shot, `carry_distance_adj` 
 ### New module: `api/corrections.py`
 
 ```python
-CLUB_SPEED_DELTA: dict[str, float]   # club_type → mph offset
-BALL_SPEED_DELTA: dict[str, float]   # club_type → mph offset
-CARRY_DELTA_EST:  dict[str, float]   # club_type → approximate carry yards offset (for stats aggregation)
+PCT_CLUB:   dict[str, float]   # club_type → fractional club speed correction (e.g. 0.014)
+PCT_BALL:   dict[str, float]   # club_type → fractional ball speed correction (e.g. 0.020)
+CARRY_MULT: dict[str, float]   # club_type → carry multiplier for stats aggregation
 
-def apply_shot_correction(shot: Shot) -> CorrectedShot
-def estimate_carry(ball_speed_mph, launch_angle_deg, spin_rate_rpm) -> float | None
+def air_density(elevation_ft: float, temperature_f: float) -> float
+def apply_shot_correction(shot: Shot, elevation_ft: float, temperature_f: float) -> CorrectedShot
+def estimate_carry(
+    ball_speed_mph: float,
+    launch_angle_deg: float,
+    spin_rate_rpm: float,
+    elevation_ft: float = 900.0,
+    temperature_f: float = 70.0,
+) -> float | None
 ```
 
-`CARRY_DELTA_EST` is used by the stats endpoint as a linear approximation (see below). Approximate values:
-- Driver: ~7.5 yds (3.0 mph ball speed × ~2.5 yds/mph)
-- Fairway/hybrid: ~6.0 yds
-- Irons/wedges: ~5.0 yds
+`CARRY_MULT` is used by the stats endpoint as a multiplicative approximation (see below). It is derived from the ball speed percentage using a ~1.7 power-law relationship between ball speed and carry:
+
+```
+CARRY_MULT = 1 + 1.7 × PCT_BALL
+```
+
+Approximate values:
+- Driver: 1.034  (1 + 1.7 × 0.020)
+- Fairway/hybrid: 1.032  (1 + 1.7 × 0.019)
+- Irons/wedges: 1.029  (1 + 1.7 × 0.017)
+
+`CARRY_MULT` captures only the speed-correction contribution to the carry difference. It is calibrated at the default air density (900 ft, 70°F) and does not update when the user changes elevation or temperature. The per-shot physics in the shots endpoint is always computed with the live air density, so the stats endpoint approximation may drift by 1–3 yards if settings deviate substantially from defaults.
 
 ### Modified `api/models.py`
 
@@ -116,22 +142,73 @@ class CorrectedShot(Shot):
 
 Raw fields (`ball_speed`, `club_speed`, `carry_distance`, `total_distance`, `smash_factor`) are always returned unchanged — the frontend decides which set to display.
 
+### Schema updates (`db/schema.sql`)
+
+`db/schema.sql` currently defines the **old wide** `swing_effort_thresholds` schema (one row per club type with `anchor_speed`, `full_speed`, `pct75_speed`, etc.). The live DB is already on the new narrow schema (one row per `club_type, bucket_index`) via a runtime migration in `_ensure_schema()`, but `schema.sql` is out of sync. Since `schema.sql` is being edited for `user_settings`, both should be fixed in the same commit:
+
+1. Replace the old `swing_effort_thresholds` definition with the current narrow schema:
+
+```sql
+CREATE TABLE IF NOT EXISTS swing_effort_thresholds (
+    club_type    TEXT NOT NULL,
+    bucket_index INTEGER NOT NULL,
+    lower_bound  DOUBLE NOT NULL,
+    upper_bound  DOUBLE,
+    label        TEXT NOT NULL,
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (club_type, bucket_index)
+);
+```
+
+2. Add the `user_settings` table below it (see next section).
+
+### New table: `user_settings` (in `db/schema.sql`)
+
+```sql
+CREATE TABLE IF NOT EXISTS user_settings (
+    id           INTEGER PRIMARY KEY DEFAULT 1,
+    elevation_ft DOUBLE  NOT NULL DEFAULT 900.0,
+    temperature_f DOUBLE NOT NULL DEFAULT 70.0
+);
+INSERT OR IGNORE INTO user_settings (id) VALUES (1);
+```
+
+A single-row table (id = 1 always). The `INSERT OR IGNORE` seed ensures the row exists with defaults after a fresh schema load.
+
+### New router: `api/routes/settings.py`
+
+```
+GET  /settings        → { elevation_ft, temperature_f }
+PATCH /settings       → body: { elevation_ft?, temperature_f? } → updated settings
+```
+
+The PATCH validates that elevation is in [0, 14000] ft and temperature is in [−40, 120]°F.
+
 ### Modified `api/routes/shots.py`
 
-Both `/shots/session/{session_id}` and `/shots/club/{club_type}` change their response type from `list[Shot]` to `list[CorrectedShot]`. After fetching rows from DB, each `Shot` is passed through `apply_shot_correction()` before serialization. No SQL changes.
+Both `/shots/session/{session_id}` and `/shots/club/{club_type}` change their response type from `list[Shot]` to `list[CorrectedShot]`. After fetching the shot rows, the route reads `elevation_ft` and `temperature_f` from `user_settings` (one extra DB query per request), then passes those values to `apply_shot_correction()` for each shot. No changes to the shot SQL queries themselves.
+
+### Modified `api/routes/swing_effort.py`
+
+`GET /swing-effort/matrix` and `GET /swing-effort/histogram/{club_type}` aggregate from raw DB values. A post-processing step applies corrections to the returned aggregates:
+
+- `carry_mean`, `total_mean` → multiply by `CARRY_MULT[club_type]`
+- `speed_mean` (club speed per bucket) → multiply by `(1 + PCT_CLUB[club_type])`
+- `smash_factor_mean` — left as raw; the ratio `PCT_BALL / PCT_CLUB` differs by at most ~0.3% across club types, a negligible change
+- Speed bin *boundaries* in the histogram response remain in raw Rapsodo space — they must stay consistent with the `swing_effort_thresholds` table which was calibrated in raw speed space
 
 ### Modified `api/routes/stats.py`
 
 `ClubStats` aggregation continues to operate on raw DB values (no SQL changes). After the query returns, a post-processing step adds four corrected mean fields to each `ClubStats` object:
 
 ```python
-carry_mean_adj      = carry_mean  + CARRY_DELTA_EST[club_type]   # linear approx
-total_mean_adj      = total_mean  + CARRY_DELTA_EST[club_type]
-ball_speed_mean_adj = ball_speed_mean + BALL_SPEED_DELTA[club_type]
-club_speed_mean_adj = club_speed_mean + CLUB_SPEED_DELTA[club_type]
+carry_mean_adj      = carry_mean      * CARRY_MULT[club_type]   # multiplicative approx
+total_mean_adj      = total_mean      * CARRY_MULT[club_type]
+ball_speed_mean_adj = ball_speed_mean * (1 + PCT_BALL[club_type])
+club_speed_mean_adj = club_speed_mean * (1 + PCT_CLUB[club_type])
 ```
 
-The carry delta is an approximation (linear, not physics-modeled) because the stats endpoint aggregates across many shots and does not iterate them individually. The approximation is within ~1–2 yards of the shot-level physics result for typical mid-iron conditions. If higher accuracy is needed in the future, the stats query can be refactored to iterate shots.
+The carry multiplier is an approximation (power-law, not per-shot physics) because the stats endpoint aggregates across many shots and does not iterate them individually. At typical mid-iron distances (~150 yds) the multiplier gives ~+4–5 yards, which is within ~1–2 yards of the shot-level physics result. If higher accuracy is needed in the future, the stats query can be refactored to iterate shots.
 
 `ClubStats` model gains four new optional fields: `carry_mean_adj`, `total_mean_adj`, `ball_speed_mean_adj`, `club_speed_mean_adj`.
 
@@ -145,9 +222,17 @@ The frontend receives `CorrectedShot` objects (which are a superset of `Shot`) f
 
 Pages display `_adj` fields by default. Column headers and stat cards that show corrected values are marked with `~` (tilde, meaning "approximate"). A page-level footnote reads:
 
-> `~` Values include an approximate Rapsodo calibration adjustment (+1–3 mph speeds, +5–8 yds carry). Toggle "Raw" to see Rapsodo-reported values.
+> `~` Values include an approximate Rapsodo calibration adjustment (~1.2–1.4% club speed, ~1.7–2.0% ball speed, ~3–5% carry). Toggle "Raw" to see Rapsodo-reported values.
 
 A **"Raw / Adjusted" toggle** (small, top-right of each affected page) switches all displays on that page between raw and corrected fields. Toggle state is local per page (no global context needed).
+
+A **Settings modal** (gear icon in the nav bar) lets the user update elevation and temperature. On open it fetches `GET /settings`; on save it calls `PATCH /settings`. The two fields are:
+- **Elevation** — number input, unit label "ft", range 0–14,000
+- **Temperature** — number input, unit label "°F", range −40–120
+
+After a successful save the page reloads its shot/stats data so carry estimates reflect the new air density. The current elevation and temperature values are shown in the footnote alongside the calibration note, e.g.:
+
+> `~` Values include an approximate Rapsodo calibration adjustment and are computed at 900 ft, 70°F. Toggle "Raw" to see Rapsodo-reported values.
 
 ### Pages affected
 
@@ -158,7 +243,8 @@ A **"Raw / Adjusted" toggle** (small, top-right of each affected page) switches 
 | **ClubDashboard** | StatCards, trend charts, shot table, dispersion scatter | `club_speed` trend line uses `_adj` points |
 | **Gapping** | Carry column, speed columns | Scatter plot axes |
 | **Bag** | `ball_speed_mean`, `club_speed_mean` | Summary table |
-| **SwingEffort** | `total_distance` | Tooltip and chart axis |
+| **SwingEffort** | `total_distance` | Tooltip and chart axis; histogram carry/total means via `/swing-effort/histogram` |
+| **WedgeMatrix** | `carry_mean`, `total_mean`, `speed_mean` | Via `/swing-effort/matrix`; per-bucket corrected means |
 | **Compare** | `total_distance` | Scatter y-axis |
 
 ### Fields that are NOT corrected (displayed raw, no marker)
@@ -175,38 +261,47 @@ These are trusted as-is from Rapsodo:
 
 ## Swing Effort Buckets — Note
 
-The `swing_effort` label (`100-80`, `80-60`, etc.) is assigned by comparing raw `club_speed` against thresholds in the `swing_effort_thresholds` table. Those thresholds were derived from the same underestimated Rapsodo data, so the relative bucket assignments remain internally consistent — every shot that was "100-80" before is still "100-80" after.
+The `swing_effort` column on each shot stores a **bucket_index** string (e.g., `"3"`) — not a label. Labels like `"Full Effort - E1 (72+ mph)"` and `"E2 (65-72 mph)"` are stored in the `swing_effort_thresholds` table and joined at query time. The thresholds use one row per `(club_type, bucket_index)` with `lower_bound` and `upper_bound` in raw Rapsodo club speed (mph).
 
-Implication: if you recalibrate the `swing_effort_thresholds` table using corrected speeds in the future, the historical bucket labels on existing shots would need to be recomputed. This is a follow-up task, not part of this change.
+Because the thresholds were calibrated from the same underestimated raw club speeds, the relative bucket assignments remain internally consistent — a shot that is "Full Effort" before correction is still "Full Effort" after, because both the shot's speed and the threshold boundary are in the same raw speed space.
+
+Implication: if the `swing_effort` calibration is ever re-run using corrected speeds, the threshold boundaries and all historical bucket assignments would need to be recomputed together. That is a follow-up task, not part of this change.
+
+**`/swing-effort/histogram` and `/swing-effort/matrix` endpoints**: these return per-bucket aggregates including `carry_mean`, `total_mean`, and `speed_mean`. The carry and total means should receive the same multiplicative correction applied to `ClubStats` (using `CARRY_MULT` and `PCT_CLUB` respectively). Speed bin *boundaries* on the histogram remain in raw Rapsodo space — consistent with the thresholds used for calibration display.
 
 ---
 
 ## What Is Not Changed
 
-- **Database schema** — no new columns, no migration needed
+- **Existing DB tables** — `shots`, `sessions`, `swing_effort_thresholds` untouched; no column migrations
 - **Ingestion pipeline** — `sync.py`, `ingester/`, `scraper/` untouched
-- **`stopping_power.py`** — depends on raw carry; could be updated in a follow-up to use `_adj` carry values
-- **`impute.py`** — club speed imputation uses raw sensor values; corrections are layered on top after imputation
+- **`stopping_power.py`** — depends on raw carry; not in scope
+- **`impute.py`** — club speed imputation uses raw sensor values; corrections layer on top after imputation
 
 ---
 
 ## Implementation Order
 
-1. `api/corrections.py` — offsets table + `estimate_carry()` + `apply_shot_correction()`
-2. `api/models.py` — add `CorrectedShot` and corrected fields to `ClubStats`
-3. `api/routes/shots.py` — apply correction after DB fetch
-4. `api/routes/stats.py` — post-process `ClubStats` with corrected means
-5. Frontend: add `_adj` fields to `Shot` TypeScript type
-6. Frontend: implement Raw/Adjusted toggle as a small shared hook or per-page state
-7. Frontend: update each page to use `_adj` fields by default with `~` marker
-8. Frontend: add per-page footnote explaining the adjustment
+1. `db/schema.sql` — replace old wide `swing_effort_thresholds` definition with current narrow schema; add `user_settings` table + seed row
+2. `api/corrections.py` — percentages table + `air_density()` + `estimate_carry()` + `apply_shot_correction()`
+3. `api/models.py` — add `CorrectedShot`, `UserSettings`, and corrected fields to `ClubStats`
+4. `api/routes/settings.py` — `GET /settings` and `PATCH /settings`
+5. `api/main.py` — register the settings router
+6. `api/routes/shots.py` — fetch settings then apply correction after DB fetch
+7. `api/routes/stats.py` — post-process `ClubStats` with corrected means
+8. `api/routes/swing_effort.py` — post-process matrix and histogram carry/total/speed means with corrections
+9. Frontend: add `_adj` fields to `Shot` TypeScript type; add `UserSettings` type
+10. Frontend: implement `useSettings` hook (`GET /settings` on mount, `PATCH` on save)
+11. Frontend: add Settings modal with elevation + temperature inputs, wired to gear icon in nav
+12. Frontend: implement Raw/Adjusted toggle as a small shared hook or per-page state
+13. Frontend: update each page to use `_adj` fields by default with `~` marker (including WedgeMatrix)
+14. Frontend: add per-page footnote showing current elevation/temperature and calibration note
 
 ---
 
 ## Open Questions / Future Work
 
-- **Altitude correction**: the physics model uses sea-level air density. If sessions are recorded at elevation, carry estimates will be slightly low. Could add a session-level altitude input.
-- **Temperature correction**: air density varies with temperature, affecting carry by ~1–2% per 10°F. Low priority.
-- **Carry delta accuracy**: the linear approximation in the stats endpoint could be replaced with shot-level physics once there is a need for sub-yard accuracy in aggregated stats.
-- **User-editable offsets**: expose the correction table via a settings API endpoint and UI page once the values are better calibrated with more Trackman data.
+- **Carry delta accuracy in stats**: the multiplicative approximation could be replaced with shot-level physics once sub-yard accuracy is needed in aggregated stats.
+- **User-editable speed offsets**: expose `PCT_CLUB` / `PCT_BALL` via the settings endpoint once more Trackman data is available for recalibration.
+- **Session-level conditions**: elevation and temperature are currently global settings. A future extension could allow per-session overrides (e.g., a tournament at altitude vs. home range).
 - **Stopping power**: `compute_stopping_power()` uses raw carry. Rerun with corrected carry in a follow-up if stopping-power comparisons are used for club selection.

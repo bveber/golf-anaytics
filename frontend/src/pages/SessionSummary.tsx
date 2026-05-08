@@ -1,7 +1,10 @@
 import { useEffect, useState, useMemo } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../api'
-import type { Session, Shot } from '../api'
+import type { Session, Shot, UserSettings } from '../api'
+import { useAdjusted } from '../hooks/useAdjusted'
+import AdjustedToggle from '../components/AdjustedToggle'
+import AdjustedFootnote from '../components/AdjustedFootnote'
 
 type SortDir = 'asc' | 'desc'
 interface SortState { key: string; dir: SortDir }
@@ -14,20 +17,20 @@ function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
   )
 }
 
-const METRICS: { key: keyof Shot; label: string; unit: string }[] = [
-  { key: 'carry_distance', label: 'Carry', unit: 'yds' },
-  { key: 'total_distance', label: 'Total', unit: 'yds' },
-  { key: 'ball_speed', label: 'Ball Speed', unit: 'mph' },
-  { key: 'club_speed', label: 'Club Speed', unit: 'mph' },
-  { key: 'smash_factor', label: 'Smash', unit: '' },
-  { key: 'launch_angle', label: 'Launch Ang.', unit: '°' },
-  { key: 'launch_direction', label: 'Launch Dir.', unit: '°' },
-  { key: 'spin_rate', label: 'Spin', unit: 'rpm' },
-  { key: 'spin_axis', label: 'Spin Axis', unit: '°' },
-  { key: 'side_carry', label: 'Side Carry', unit: 'yds' },
-  { key: 'apex', label: 'Apex', unit: 'yds' },
-  { key: 'attack_angle', label: 'Attack Ang.', unit: '°' },
-  { key: 'club_path', label: 'Club Path', unit: '°' },
+const BASE_METRICS: { key: keyof Shot; adjKey: keyof Shot | null; label: string; adjLabel: string; unit: string }[] = [
+  { key: 'carry_distance', adjKey: 'carry_distance_adj', label: 'Carry', adjLabel: '~Carry', unit: 'yds' },
+  { key: 'total_distance', adjKey: 'total_distance_adj', label: 'Total', adjLabel: '~Total', unit: 'yds' },
+  { key: 'ball_speed', adjKey: 'ball_speed_adj', label: 'Ball Speed', adjLabel: '~Ball Speed', unit: 'mph' },
+  { key: 'club_speed', adjKey: 'club_speed_adj', label: 'Club Speed', adjLabel: '~Club Speed', unit: 'mph' },
+  { key: 'smash_factor', adjKey: null, label: 'Smash', adjLabel: 'Smash', unit: '' },
+  { key: 'launch_angle', adjKey: null, label: 'Launch Ang.', adjLabel: 'Launch Ang.', unit: '°' },
+  { key: 'launch_direction', adjKey: null, label: 'Launch Dir.', adjLabel: 'Launch Dir.', unit: '°' },
+  { key: 'spin_rate', adjKey: null, label: 'Spin', adjLabel: 'Spin', unit: 'rpm' },
+  { key: 'spin_axis', adjKey: null, label: 'Spin Axis', adjLabel: 'Spin Axis', unit: '°' },
+  { key: 'side_carry', adjKey: null, label: 'Side Carry', adjLabel: 'Side Carry', unit: 'yds' },
+  { key: 'apex', adjKey: null, label: 'Apex', adjLabel: 'Apex', unit: 'yds' },
+  { key: 'attack_angle', adjKey: null, label: 'Attack Ang.', adjLabel: 'Attack Ang.', unit: '°' },
+  { key: 'club_path', adjKey: null, label: 'Club Path', adjLabel: 'Club Path', unit: '°' },
 ]
 
 function fmt(v: number | null, unit: string) {
@@ -43,6 +46,8 @@ export default function SessionSummary() {
   const [editing, setEditing] = useState<string | null>(null)
   const [noteText, setNoteText] = useState('')
   const [sort, setSort] = useState<SortState>({ key: 'shot_number', dir: 'asc' })
+  const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
+  const { adjusted, toggleAdjusted } = useAdjusted()
 
   const toggleSort = (key: string) =>
     setSort((prev) => prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' })
@@ -65,6 +70,10 @@ export default function SessionSummary() {
     api.session(id).then(setSession)
     api.shotsForSession(id).then(setShots)
   }, [id])
+
+  useEffect(() => {
+    api.getSettings().then(setSettings)
+  }, [])
 
   async function toggleOutlier(shot: Shot) {
     const newVal = !shot.is_outlier
@@ -104,12 +113,15 @@ export default function SessionSummary() {
               {session.session_type} · {shots.length} shots
             </p>
           </div>
-          <button
-            onClick={() => navigate(`/session/${id}/clubs`)}
-            className="px-3 py-1.5 rounded text-sm bg-slate-700 text-slate-300 hover:bg-green-800 hover:text-white transition-colors"
-          >
-            By Club →
-          </button>
+          <div className="flex items-center gap-2">
+            <AdjustedToggle adjusted={adjusted} onToggle={toggleAdjusted} />
+            <button
+              onClick={() => navigate(`/session/${id}/clubs`)}
+              className="px-3 py-1.5 rounded text-sm bg-slate-700 text-slate-300 hover:bg-green-800 hover:text-white transition-colors"
+            >
+              By Club →
+            </button>
+          </div>
         </div>
       )}
 
@@ -120,7 +132,7 @@ export default function SessionSummary() {
               {([
                 { key: 'shot_number', label: '#' },
                 { key: 'club_type', label: 'Club' },
-                ...METRICS.map((m) => ({ key: m.key as string, label: m.label })),
+                ...BASE_METRICS.map((m) => ({ key: m.key as string, label: adjusted ? m.adjLabel : m.label })),
               ] as { key: string; label: string }[]).map(({ key, label }) => (
                 <th
                   key={key}
@@ -148,11 +160,16 @@ export default function SessionSummary() {
               >
                 <td className="px-3 py-1.5 text-slate-500">{shot.shot_number}</td>
                 <td className="px-3 py-1.5 whitespace-nowrap font-medium">{shot.club_type ?? '—'}</td>
-                {METRICS.map((m) => (
-                  <td key={m.key} className="px-3 py-1.5 text-right">
-                    {fmt(shot[m.key] as number | null, m.unit)}
-                  </td>
-                ))}
+                {BASE_METRICS.map((m) => {
+                  const rawVal = shot[m.key] as number | null
+                  const adjVal = m.adjKey ? shot[m.adjKey] as number | null : null
+                  const displayVal = adjusted && m.adjKey ? (adjVal ?? rawVal) : rawVal
+                  return (
+                    <td key={m.key} className="px-3 py-1.5 text-right">
+                      {fmt(displayVal, m.unit)}
+                    </td>
+                  )
+                })}
                 <td className="px-3 py-1.5">
                   <button
                     onClick={() => toggleOutlier(shot)}
@@ -192,6 +209,7 @@ export default function SessionSummary() {
           </tbody>
         </table>
       </div>
+      {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}
     </div>
   )
 }

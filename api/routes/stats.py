@@ -1,5 +1,9 @@
-from fastapi import APIRouter
+from __future__ import annotations
+
 from typing import Optional
+
+from fastapi import APIRouter
+
 from api.db import get_conn
 from api.models import ClubStats
 
@@ -162,7 +166,23 @@ def club_stats(
             AVG(CASE WHEN q.shot_count < 8
                      OR sh.apex             BETWEEN q.apex_q1       - 1.5*(q.apex_q3-q.apex_q1)
                                                 AND q.apex_q3       + 1.5*(q.apex_q3-q.apex_q1)
-                THEN sh.apex            END)                                           AS apex_mean
+                THEN sh.apex            END)                                           AS apex_mean,
+            AVG(CASE WHEN q.shot_count < 8
+                     OR sh.carry_distance  BETWEEN q.carry_q1  - 1.5*(q.carry_q3-q.carry_q1)
+                                               AND q.carry_q3  + 1.5*(q.carry_q3-q.carry_q1)
+                THEN sh.carry_distance_adj END)                                        AS carry_mean_adj,
+            AVG(CASE WHEN q.shot_count < 8
+                     OR sh.total_distance  BETWEEN q.total_q1  - 1.5*(q.total_q3-q.total_q1)
+                                               AND q.total_q3  + 1.5*(q.total_q3-q.total_q1)
+                THEN sh.total_distance_adj END)                                        AS total_mean_adj,
+            AVG(CASE WHEN q.shot_count < 8
+                     OR sh.ball_speed      BETWEEN q.ball_speed_q1 - 1.5*(q.ball_speed_q3-q.ball_speed_q1)
+                                               AND q.ball_speed_q3 + 1.5*(q.ball_speed_q3-q.ball_speed_q1)
+                THEN sh.ball_speed_adj END)                                            AS ball_speed_mean_adj,
+            AVG(CASE WHEN q.shot_count < 8
+                     OR sh.club_speed      BETWEEN q.club_speed_q1 - 1.5*(q.club_speed_q3-q.club_speed_q1)
+                                               AND q.club_speed_q3 + 1.5*(q.club_speed_q3-q.club_speed_q1)
+                THEN sh.club_speed_adj END)                                            AS club_speed_mean_adj
         FROM shots sh
         JOIN sessions s ON s.session_id = sh.session_id
         JOIN iqr q ON q.club = sh.club AND q.club_type = sh.club_type
@@ -173,7 +193,6 @@ def club_stats(
         params * 2,
     ).fetchall()
 
-
     cols = [
         "club", "club_type", "shot_count", "carry_mean", "carry_std",
         "total_mean", "total_std",
@@ -181,6 +200,7 @@ def club_stats(
         "side_carry_mean", "side_carry_std", "launch_angle_mean", "club_speed_mean",
         "spin_axis_mean", "club_path_mean", "attack_angle_mean",
         "launch_direction_mean", "apex_mean",
+        "carry_mean_adj", "total_mean_adj", "ball_speed_mean_adj", "club_speed_mean_adj",
     ]
     return [ClubStats(**dict(zip(cols, r))) for r in rows]
 
@@ -239,7 +259,6 @@ def club_trend(
         """,
         params,
     ).fetchall()
-
 
     return [
         {

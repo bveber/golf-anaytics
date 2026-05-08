@@ -1,7 +1,12 @@
-from fastapi import APIRouter, HTTPException
-from typing import Optional
+from __future__ import annotations
+
 from collections import defaultdict
+from typing import Optional
+
 import jenkspy
+from fastapi import APIRouter, HTTPException
+
+from api.corrections import _carry_mult, _pct_club
 
 router = APIRouter(prefix="/swing-effort", tags=["swing-effort"])
 
@@ -293,6 +298,13 @@ def speed_histogram(club_type: str, disabled_clubs: Optional[str] = None):
         })
         lo += BIN_WIDTH
 
+    cm = _carry_mult(club_type)
+    for bin_ in histogram:
+        if bin_["carry"] is not None:
+            bin_["carry"] = round(bin_["carry"] * cm, 1)
+        if bin_["total_distance"] is not None:
+            bin_["total_distance"] = round(bin_["total_distance"] * cm, 1)
+
     try:
         threshold_rows = conn.execute(
             "SELECT bucket_index, lower_bound, upper_bound, label FROM swing_effort_thresholds WHERE club_type = ? ORDER BY bucket_index",
@@ -368,6 +380,7 @@ def wedge_matrix(
             STDDEV(s.side_carry)     AS side_carry_std,
             AVG(s.apex)              AS apex_mean,
             AVG(s.club_speed)        AS speed_mean,
+            AVG(s.ball_speed)        AS ball_speed_mean,
             AVG(s.spin_rate)         AS spin_rate_mean,
             AVG(s.smash_factor)      AS smash_factor_mean,
             AVG(s.attack_angle)      AS attack_angle_mean
@@ -383,14 +396,14 @@ def wedge_matrix(
     bucket_groups: dict = defaultdict(list)
     first_club_for_type: dict = {}
 
-    for club_type, club, effort, bucket_label, n, carry_mean, carry_std, total_mean, side_carry_std, apex_mean, speed_mean, spin_rate_mean, smash_factor_mean, attack_angle_mean in rows:
+    for club_type, club, effort, bucket_label, n, carry_mean, carry_std, total_mean, side_carry_std, apex_mean, speed_mean, ball_speed_mean, spin_rate_mean, smash_factor_mean, attack_angle_mean in rows:
         if club_type not in first_club_for_type:
             first_club_for_type[club_type] = club
         bucket_groups[(club_type, effort)].append({
             "n": n, "label": bucket_label,
             "carry_mean": carry_mean, "carry_std": carry_std,
             "total_mean": total_mean, "side_carry_std": side_carry_std,
-            "apex_mean": apex_mean, "speed_mean": speed_mean,
+            "apex_mean": apex_mean, "speed_mean": speed_mean, "ball_speed_mean": ball_speed_mean,
             "spin_rate_mean": spin_rate_mean, "smash_factor_mean": smash_factor_mean,
             "attack_angle_mean": attack_angle_mean,
         })
@@ -418,10 +431,23 @@ def wedge_matrix(
             "side_carry_std":    round(_wavg(bucket_rows, "side_carry_std"), 1)     if _wavg(bucket_rows, "side_carry_std") is not None else None,
             "apex_mean":         round(_wavg(bucket_rows, "apex_mean"), 1)          if _wavg(bucket_rows, "apex_mean") is not None else None,
             "speed_mean":        round(_wavg(bucket_rows, "speed_mean"), 1)         if _wavg(bucket_rows, "speed_mean") is not None else None,
+            "ball_speed_mean":   round(_wavg(bucket_rows, "ball_speed_mean"), 1)    if _wavg(bucket_rows, "ball_speed_mean") is not None else None,
             "spin_rate_mean":    round(_wavg(bucket_rows, "spin_rate_mean"), 0)     if _wavg(bucket_rows, "spin_rate_mean") is not None else None,
             "smash_factor_mean": round(_wavg(bucket_rows, "smash_factor_mean"), 2)  if _wavg(bucket_rows, "smash_factor_mean") is not None else None,
             "attack_angle_mean": round(_wavg(bucket_rows, "attack_angle_mean"), 1)  if _wavg(bucket_rows, "attack_angle_mean") is not None else None,
         }
+
+    # Apply speed corrections to matrix bucket values.
+    for club_type, club_data in matrix.items():
+        cm = _carry_mult(club_type)
+        pc = _pct_club(club_type)
+        for effort, bucket in club_data["buckets"].items():
+            if bucket["carry_mean"] is not None:
+                bucket["carry_mean"] = round(bucket["carry_mean"] * cm, 1)
+            if bucket["total_mean"] is not None:
+                bucket["total_mean"] = round(bucket["total_mean"] * cm, 1)
+            if bucket["speed_mean"] is not None:
+                bucket["speed_mean"] = round(bucket["speed_mean"] * (1 + pc), 1)
 
     # Rekey each club's buckets by effort rank (rank 1 = full effort = highest raw bucket_index).
     # This aligns "Full Effort" to key "1" across all clubs regardless of their total bucket count.
