@@ -9,81 +9,11 @@ import type { Session, ClubStats, Shot, UserSettings } from '../api'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'
+import { computeEllipses } from '../utils/ellipse'
 
-// ── PCA / ellipse helpers ──────────────────────────────────────────────────
+// ── Local types ────────────────────────────────────────────────────────────
 
 interface Point { x: number; y: number }
-
-interface Ellipse {
-  cx: number; cy: number
-  rx: number; ry: number
-  angleDeg: number
-  inlierCount: number
-}
-
-function filterOutliersPearson(pts: Point[]): Point[] {
-  if (pts.length < 4) return pts
-  const n = pts.length
-  const mx = pts.reduce((s, p) => s + p.x, 0) / n
-  const my = pts.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of pts) {
-    sxx += (p.x - mx) ** 2
-    syy += (p.y - my) ** 2
-    sxy += (p.x - mx) * (p.y - my)
-  }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-  const det = sxx * syy - sxy * sxy
-  if (det < 1e-10) return pts
-  return pts.filter(p => {
-    const dx = p.x - mx, dy = p.y - my
-    const d2 = (syy * dx * dx - 2 * sxy * dx * dy + sxx * dy * dy) / det
-    return d2 <= 4.605
-  })
-}
-
-function computeEllipse(pts: Point[]): Ellipse | null {
-  const inliers = filterOutliersPearson(pts)
-  if (inliers.length < 3) return null
-  const n = inliers.length
-  const mx = inliers.reduce((s, p) => s + p.x, 0) / n
-  const my = inliers.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of inliers) {
-    sxx += (p.x - mx) ** 2
-    syy += (p.y - my) ** 2
-    sxy += (p.x - mx) * (p.y - my)
-  }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-  const trace = sxx + syy
-  const disc = Math.sqrt(Math.max(0, ((sxx - syy) / 2) ** 2 + sxy * sxy))
-  const lambda1 = trace / 2 + disc
-  const lambda2 = trace / 2 - disc
-  const angleDeg = (Math.atan2(2 * sxy, sxx - syy) / 2) * (180 / Math.PI)
-  const scale = Math.sqrt(3.219)
-  return {
-    cx: mx, cy: my,
-    rx: Math.sqrt(Math.max(0, lambda1)) * scale,
-    ry: Math.sqrt(Math.max(0, lambda2)) * scale,
-    angleDeg,
-    inlierCount: n,
-  }
-}
-
-function ellipseOutlinePoints(e: Ellipse, n = 72): Point[] {
-  const rad = (e.angleDeg * Math.PI) / 180
-  const pts: Point[] = []
-  for (let i = 0; i <= n; i++) {
-    const t = (i / n) * 2 * Math.PI
-    const ex = e.rx * Math.cos(t)
-    const ey = e.ry * Math.sin(t)
-    pts.push({
-      x: e.cx + ex * Math.cos(rad) - ey * Math.sin(rad),
-      y: e.cy + ex * Math.sin(rad) + ey * Math.cos(rad),
-    })
-  }
-  return pts
-}
 
 // ── Metrics ────────────────────────────────────────────────────────────────
 
@@ -290,10 +220,8 @@ export default function SessionClubs() {
         .map((s) => ({ x: s.side_carry!, y: yVal(s)! }))
     : []
 
-  const sessionEllipse = computeEllipse(sessionPts)
-  const sessionEllipsePts = sessionEllipse ? ellipseOutlinePoints(sessionEllipse) : []
-  const historicalEllipse = computeEllipse(historicalPts)
-  const historicalEllipsePts = historicalEllipse ? ellipseOutlinePoints(historicalEllipse) : []
+  const sessionEllipses = computeEllipses(sessionPts)
+  const historicalEllipses = computeEllipses(historicalPts)
 
   // Session stats for selected club
   const sessionClubStats = clubs.find((c) => c.club_type === selectedClubType) ?? null
@@ -482,7 +410,7 @@ export default function SessionClubs() {
                           <span className="text-yellow-400">●</span> This session ({sessionPts.length} shots)
                           &nbsp;·&nbsp;
                           <span className="text-blue-400">●</span> Historical ({historicalPts.length} shots)
-                          &nbsp;·&nbsp; dashed = 80% ellipse
+                          &nbsp;·&nbsp; 50% · 75% · 95% confidence ellipses
                         </p>
                       </div>
                       <div className="flex items-center gap-3">
@@ -501,8 +429,8 @@ export default function SessionClubs() {
                           </button>
                         </div>
                         <div className="text-right text-xs text-slate-500">
-                          {sessionEllipse && <div>Session: {sessionEllipse.inlierCount} inliers</div>}
-                          {historicalEllipse && <div>Historical: {historicalEllipse.inlierCount} inliers</div>}
+                          {sessionEllipses && <div>Session: {sessionEllipses.inlierCount} inliers</div>}
+                          {historicalEllipses && <div>Historical: {historicalEllipses.inlierCount} inliers</div>}
                         </div>
                       </div>
                     </div>
@@ -550,28 +478,6 @@ export default function SessionClubs() {
                         />
                         <ReferenceLine x={0} stroke="#475569" />
 
-                        {/* Historical ellipse */}
-                        {historicalEllipsePts.length > 0 && (
-                          <Scatter
-                            data={historicalEllipsePts}
-                            line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                            shape={() => null as unknown as React.ReactElement}
-                            fill="transparent"
-                            isAnimationActive={false}
-                            legendType="none"
-                          />
-                        )}
-                        {/* Session ellipse */}
-                        {sessionEllipsePts.length > 0 && (
-                          <Scatter
-                            data={sessionEllipsePts}
-                            line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                            shape={() => null as unknown as React.ReactElement}
-                            fill="transparent"
-                            isAnimationActive={false}
-                            legendType="none"
-                          />
-                        )}
                         {/* Historical dots */}
                         <Scatter
                           name="Historical"
@@ -588,6 +494,64 @@ export default function SessionClubs() {
                           fillOpacity={0.85}
                           isAnimationActive={false}
                         />
+                        {/* Historical ellipses — blue family */}
+                        {historicalEllipses && (
+                          <>
+                            <Scatter
+                              data={historicalEllipses.ellipses[2].points}
+                              line={{ stroke: 'rgba(59,130,246,0.65)', strokeWidth: 1.5, strokeDasharray: '4 2' }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                            <Scatter
+                              data={historicalEllipses.ellipses[1].points}
+                              line={{ stroke: 'rgba(59,130,246,0.82)', strokeWidth: 2.5, strokeDasharray: '6 2' }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                            <Scatter
+                              data={historicalEllipses.ellipses[0].points}
+                              line={{ stroke: 'rgba(59,130,246,1.0)', strokeWidth: 3 }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                          </>
+                        )}
+                        {/* Session ellipses — yellow family */}
+                        {sessionEllipses && (
+                          <>
+                            <Scatter
+                              data={sessionEllipses.ellipses[2].points}
+                              line={{ stroke: 'rgba(234,179,8,0.65)', strokeWidth: 1.5, strokeDasharray: '4 2' }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                            <Scatter
+                              data={sessionEllipses.ellipses[1].points}
+                              line={{ stroke: 'rgba(234,179,8,0.82)', strokeWidth: 2.5, strokeDasharray: '6 2' }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                            <Scatter
+                              data={sessionEllipses.ellipses[0].points}
+                              line={{ stroke: 'rgba(234,179,8,1.0)', strokeWidth: 3 }}
+                              shape={() => null as unknown as React.ReactElement}
+                              fill="transparent"
+                              isAnimationActive={false}
+                              legendType="none"
+                            />
+                          </>
+                        )}
                       </ScatterChart>
                     </ResponsiveContainer>
                   </div>
