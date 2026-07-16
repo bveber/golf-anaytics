@@ -16,6 +16,41 @@ from db import get_connection
 _DB_PATH = Path(__file__).parent.parent / "db" / "golf_analytics.duckdb"
 
 
+def _apply_effort_thresholds(shot_ids: list[str]) -> None:
+    """Classify new shots using existing thresholds so they appear on the Clubs page."""
+    if not shot_ids:
+        return
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT club_type, bucket_index, upper_bound FROM swing_effort_thresholds ORDER BY club_type, bucket_index"
+    ).fetchall()
+    if not rows:
+        return
+
+    thresholds: dict[str, list[tuple[int, float | None]]] = {}
+    for club_type, bucket_index, upper_bound in rows:
+        thresholds.setdefault(club_type, []).append((bucket_index, upper_bound))
+
+    placeholders = ",".join("?" * len(shot_ids))
+    shots = conn.execute(
+        f"SELECT shot_id, club_type, club_speed FROM shots WHERE shot_id IN ({placeholders})",
+        shot_ids,
+    ).fetchall()
+
+    for shot_id, club_type, club_speed in shots:
+        if club_type not in thresholds:
+            continue
+        if club_speed is None:
+            conn.execute("UPDATE shots SET swing_effort = 'unknown' WHERE shot_id = ?", [shot_id])
+        else:
+            effort = str(thresholds[club_type][-1][0])
+            for bucket_index, upper_bound in thresholds[club_type]:
+                if upper_bound is None or club_speed <= upper_bound:
+                    effort = str(bucket_index)
+                    break
+            conn.execute("UPDATE shots SET swing_effort = ? WHERE shot_id = ?", [effort, shot_id])
+
+
 def load_session(session: ParsedSession) -> int:
     """
     Insert the session and any new shots into the database.
@@ -61,6 +96,7 @@ def load_session(session: ParsedSession) -> int:
 
     if new_shots:
         impute_club_speeds()
+        _apply_effort_thresholds(shot_ids=[s.shot_id for s in new_shots])
         compute_stopping_power(shot_ids=[s.shot_id for s in new_shots])
         adj_conn = duckdb.connect(str(_DB_PATH))
         try:

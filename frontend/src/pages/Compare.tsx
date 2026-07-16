@@ -4,66 +4,12 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { api } from '../api'
-import type { Shot, GtShot, Session, UserSettings } from '../api'
+import type { Shot, GtShot, Session, UserSettings, SwingEffortBucket } from '../api'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'
-
-// ── Ellipse helpers (80% confidence, chi²(2,0.80) ≈ 3.219) ─────────────────
-
-interface Point { x: number; y: number }
-interface Ellipse { cx: number; cy: number; rx: number; ry: number; angleDeg: number; inlierCount: number }
-
-function filterOutliersPearson(pts: Point[]): Point[] {
-  if (pts.length < 4) return pts
-  const n = pts.length
-  const mx = pts.reduce((s, p) => s + p.x, 0) / n
-  const my = pts.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of pts) { sxx += (p.x - mx) ** 2; syy += (p.y - my) ** 2; sxy += (p.x - mx) * (p.y - my) }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-  const det = sxx * syy - sxy * sxy
-  if (det < 1e-10) return pts
-  // chi²(2, 0.90) ≈ 4.605
-  return pts.filter(p => {
-    const dx = p.x - mx, dy = p.y - my
-    return (syy * dx * dx - 2 * sxy * dx * dy + sxx * dy * dy) / det <= 4.605
-  })
-}
-
-function computeEllipse(pts: Point[]): Ellipse | null {
-  const inliers = filterOutliersPearson(pts)
-  if (inliers.length < 3) return null
-  const n = inliers.length
-  const mx = inliers.reduce((s, p) => s + p.x, 0) / n
-  const my = inliers.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of inliers) { sxx += (p.x - mx) ** 2; syy += (p.y - my) ** 2; sxy += (p.x - mx) * (p.y - my) }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-  const trace = sxx + syy
-  const disc = Math.sqrt(Math.max(0, ((sxx - syy) / 2) ** 2 + sxy * sxy))
-  const lambda1 = trace / 2 + disc
-  const lambda2 = trace / 2 - disc
-  const angleDeg = (Math.atan2(2 * sxy, sxx - syy) / 2) * (180 / Math.PI)
-  const scale = Math.sqrt(3.219)  // 80% chi² scale
-  return { cx: mx, cy: my, rx: Math.sqrt(Math.max(0, lambda1)) * scale, ry: Math.sqrt(Math.max(0, lambda2)) * scale, angleDeg, inlierCount: n }
-}
-
-function ellipseArea(e: Ellipse): number {
-  return Math.PI * e.rx * e.ry
-}
-
-function ellipseOutlinePoints(e: Ellipse, n = 72): Point[] {
-  const rad = (e.angleDeg * Math.PI) / 180
-  const pts: Point[] = []
-  for (let i = 0; i <= n; i++) {
-    const t = (i / n) * 2 * Math.PI
-    const ex = e.rx * Math.cos(t)
-    const ey = e.ry * Math.sin(t)
-    pts.push({ x: e.cx + ex * Math.cos(rad) - ey * Math.sin(rad), y: e.cy + ex * Math.sin(rad) + ey * Math.cos(rad) })
-  }
-  return pts
-}
+import { computeEllipses } from '../utils/ellipse'
+import type { EllipseResult } from '../utils/ellipse'
 
 // On-course club_id → Rapsodo club_type mapping
 const CLUB_MAP: Record<number, string> = {
@@ -94,6 +40,13 @@ const CLUB_LABELS: Record<string, string> = {
 }
 
 const COMPARABLE_CLUBS = Object.keys(REVERSE_MAP)
+
+const BUCKET_PALETTE = ['#f87171', '#fb923c', '#facc15', '#a3e635', '#34d399', '#22d3ee', '#60a5fa', '#818cf8']
+function bucketColor(index: number, total: number): string {
+  if (total <= 1) return BUCKET_PALETTE[6]
+  const pos = Math.round(((index - 1) / Math.max(total - 1, 1)) * (BUCKET_PALETTE.length - 1))
+  return BUCKET_PALETTE[Math.min(pos, BUCKET_PALETTE.length - 1)]
+}
 
 interface DispPt {
   x: number
@@ -176,12 +129,25 @@ interface LateralStats {
   width80: number       // 80% confidence lateral spread = 2 × sqrt(var(x)) × sqrt(3.219)
 }
 
+/** Shoelace formula — area of a closed polygon defined by ordered points. */
+function polygonArea(pts: Array<{ x: number; y: number }>): number {
+  let area = 0
+  const n = pts.length
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n
+    area += pts[i].x * pts[j].y
+    area -= pts[j].x * pts[i].y
+  }
+  return Math.abs(area) / 2
+}
+
 function computePanelSummary(pts: DispPt[]): PanelSummary {
   if (pts.length === 0) return { avgCarry: null, avgOffline: null, area: null, shotCount: 0 }
   const avgCarry = pts.reduce((s, p) => s + p.distance, 0) / pts.length
   const avgOffline = pts.reduce((s, p) => s + Math.abs(p.x), 0) / pts.length
-  const ellipse = computeEllipse(pts.map(p => ({ x: p.x, y: p.y })))
-  const area = ellipse ? ellipseArea(ellipse) : null
+  const ellipseResult = computeEllipses(pts.map(p => ({ x: p.x, y: p.y })))
+  // Use the 95% ellipse ring (index 2) for area — preserves relative ranking across clubs
+  const area = ellipseResult ? polygonArea(ellipseResult.ellipses[2].points) : null
   return { avgCarry, avgOffline, area, shotCount: pts.length }
 }
 
@@ -279,16 +245,18 @@ function LateralStatsRow({ stats }: { stats: LateralStats }) {
 }
 
 function ScatterPanel({
-  title, subtitle, pts, color, axisMax,
+  title, subtitle, pts, color, xAxisMax, yAxisMax,
 }: {
   title: string
   subtitle: string
   pts: DispPt[]
   color: string
-  axisMax: number
+  xAxisMax: number
+  yAxisMax: number
 }) {
-  const ellipse = pts.length >= 3 ? computeEllipse(pts.map(p => ({ x: p.x, y: p.y }))) : null
-  const ellipsePts = ellipse ? ellipseOutlinePoints(ellipse) : []
+  const ellipseResult: EllipseResult | null = pts.length >= 3
+    ? computeEllipses(pts.map(p => ({ x: p.x, y: p.y })))
+    : null
   const summary = computePanelSummary(pts)
   const lateral = computeLateralStats(pts)
 
@@ -305,14 +273,14 @@ function ScatterPanel({
               <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
               <XAxis
                 type="number" dataKey="x" name="Offline"
-                domain={[-axisMax, axisMax]}
+                domain={[-xAxisMax, xAxisMax]}
                 tickCount={7}
                 tick={{ fill: '#94a3b8', fontSize: 11 }}
                 label={{ value: '← Left  |  Right →', position: 'bottom', fill: '#94a3b8', fontSize: 11 }}
               />
               <YAxis
                 type="number" dataKey="y" name="Distance"
-                domain={[-axisMax, axisMax]}
+                domain={[-yAxisMax, yAxisMax]}
                 tickCount={7}
                 tick={{ fill: '#94a3b8', fontSize: 11 }}
                 label={{ value: 'Short ↓ | Long ↑', angle: -90, position: 'insideLeft', fill: '#94a3b8', fontSize: 11 }}
@@ -321,19 +289,40 @@ function ScatterPanel({
               <ReferenceLine x={0} stroke="#475569" />
               <ReferenceLine y={0} stroke="#475569" />
               <Scatter data={pts} fill={color} fillOpacity={0.7} r={5} />
-              {ellipsePts.length > 0 && (
-                <Scatter
-                  data={ellipsePts}
-                  line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                  shape={() => null as unknown as React.ReactElement}
-                  fill="transparent"
-                  legendType="none"
-                  tooltipType="none"
-                />
+              {ellipseResult && (
+                <>
+                  <Scatter
+                    data={ellipseResult.ellipses[2].points}
+                    line={{ stroke: 'rgba(255,255,255,0.65)', strokeWidth: 1.5, strokeDasharray: '4 2' }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    legendType="none"
+                    tooltipType="none"
+                    isAnimationActive={false}
+                  />
+                  <Scatter
+                    data={ellipseResult.ellipses[1].points}
+                    line={{ stroke: 'rgba(255,255,255,0.82)', strokeWidth: 2.5, strokeDasharray: '6 2' }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    legendType="none"
+                    tooltipType="none"
+                    isAnimationActive={false}
+                  />
+                  <Scatter
+                    data={ellipseResult.ellipses[0].points}
+                    line={{ stroke: 'rgba(255,255,255,1.0)', strokeWidth: 3 }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    legendType="none"
+                    tooltipType="none"
+                    isAnimationActive={false}
+                  />
+                </>
               )}
             </ScatterChart>
           </ResponsiveContainer>
-          <p className="text-slate-600 text-xs text-center mt-1">{pts.length} shots · 80% ellipse</p>
+          <p className="text-slate-600 text-xs text-center mt-1">{pts.length} shots · 50% · 75% · 95% confidence ellipses</p>
           <SummaryRow summary={summary} />
           {lateral && <LateralStatsRow stats={lateral} />}
         </>
@@ -357,6 +346,11 @@ export default function Compare() {
   const [allClubShots, setAllClubShots] = useState<Map<string, GtShot[]>>(new Map())
   const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
   const { adjusted, toggleAdjusted } = useAdjusted()
+  const [dateFrom, setDateFrom] = useState('')
+  const [dateTo, setDateTo] = useState('')
+  const [lastNSessions, setLastNSessions] = useState<number | null>(null)
+  const [clubBuckets, setClubBuckets] = useState<SwingEffortBucket[]>([])
+  const [enabledEfforts, setEnabledEfforts] = useState<Set<string>>(new Set())
 
   useEffect(() => {
     api.getSettings().then(setSettings)
@@ -384,17 +378,43 @@ export default function Compare() {
 
     const clubIds = REVERSE_MAP[selectedClub] ?? []
 
-    api.shotsByClub(selectedClub).then(setRapsodoShots).catch(() => {})
+    Promise.all([
+      api.shotsByClub(selectedClub),
+      api.swingEffortThresholds(),
+    ]).then(([shots, allThresholds]) => {
+      setRapsodoShots(shots)
+      const buckets = allThresholds.find((t) => t.club_type === selectedClub)?.buckets ?? []
+      setClubBuckets(buckets)
+      setEnabledEfforts(new Set(buckets.map((b) => String(b.bucket_index))))
+    }).catch(() => {})
 
     Promise.all(clubIds.map((id) => api.gtShots(id)))
       .then((results) => setOnCourseShots(results.flat()))
       .catch(() => {})
   }, [selectedClub])
 
-  const filteredRapsodo = excludeMishits ? rapsodoShots.filter((s) => !s.is_outlier) : rapsodoShots
+  const sortedSessionIds = useMemo(() => {
+    const seen = new Set<string>()
+    return rapsodoShots
+      .map((s) => ({ id: s.session_id, date: s.session_date ?? '' }))
+      .filter((s) => { if (seen.has(s.id)) return false; seen.add(s.id); return true })
+      .sort((a, b) => b.date.localeCompare(a.date))
+      .map((s) => s.id)
+  }, [rapsodoShots])
+
+  const lastNSessionSet = lastNSessions != null ? new Set(sortedSessionIds.slice(0, lastNSessions)) : null
+
+  const filteredRapsodo = rapsodoShots.filter((s) => {
+    if (excludeMishits && s.is_outlier) return false
+    if (dateFrom && (s.session_date ?? '') < dateFrom) return false
+    if (dateTo && (s.session_date ?? '') > dateTo) return false
+    if (lastNSessionSet && !lastNSessionSet.has(s.session_id)) return false
+    if (clubBuckets.length > 0 && enabledEfforts.size > 0 && s.swing_effort != null && !enabledEfforts.has(s.swing_effort)) return false
+    return true
+  })
   const filteredOnCourse = excludeMishits ? onCourseShots.filter((s) => !s.is_mishit) : onCourseShots
 
-  const hiddenRapsodoCount = excludeMishits ? rapsodoShots.length - filteredRapsodo.length : 0
+  const hiddenRapsodoCount = rapsodoShots.length - filteredRapsodo.length
   const hiddenOnCourseCount = excludeMishits ? onCourseShots.length - filteredOnCourse.length : 0
 
   const totalDistShots = filteredRapsodo.filter((s) => s.total_distance != null)
@@ -410,11 +430,16 @@ export default function Compare() {
   const rapsodoPts = toRapsodoPts(filteredRapsodo, avgTotal, sessionMap, adjusted)
   const onCoursePts = toOnCoursePts(filteredOnCourse, avgDist)
 
-  const allVals = [
-    ...rapsodoPts.flatMap((p) => [Math.abs(p.x), Math.abs(p.y)]),
-    ...onCoursePts.flatMap((p) => [Math.abs(p.x), Math.abs(p.y)]),
+  const allXVals = [
+    ...rapsodoPts.map((p) => Math.abs(p.x)),
+    ...onCoursePts.map((p) => Math.abs(p.x)),
   ]
-  const axisMax = allVals.length ? Math.ceil(Math.max(...allVals) * 1.2 / 10) * 10 : 50
+  const allYVals = [
+    ...rapsodoPts.map((p) => Math.abs(p.y)),
+    ...onCoursePts.map((p) => Math.abs(p.y)),
+  ]
+  const xAxisMax = allXVals.length ? Math.ceil(Math.max(...allXVals) * 1.3 / 5) * 5 : 30
+  const yAxisMax = allYVals.length ? Math.ceil(Math.max(...allYVals) * 1.2 / 10) * 10 : 50
 
   const clubRanking: ClubRankEntry[] = useMemo(() => {
     const entries: ClubRankEntry[] = []
@@ -424,9 +449,10 @@ export default function Compare() {
       if (validShots.length < 3) continue
       const avgD = validShots.reduce((s, sh) => s + sh.distance_traveled!, 0) / validShots.length
       const pts = toOnCoursePts(validShots, avgD)
-      const ellipse = computeEllipse(pts.map((p) => ({ x: p.x, y: p.y })))
-      if (!ellipse) continue
-      entries.push({ clubKey, label: CLUB_LABELS[clubKey] ?? clubKey, area: ellipseArea(ellipse) })
+      const ellipseResult = computeEllipses(pts.map((p) => ({ x: p.x, y: p.y })))
+      if (!ellipseResult) continue
+      // Use the 95% ellipse polygon area for consistent club ranking
+      entries.push({ clubKey, label: CLUB_LABELS[clubKey] ?? clubKey, area: polygonArea(ellipseResult.ellipses[2].points) })
     }
     return entries.sort((a, b) => a.area - b.area).slice(0, 3)
   }, [allClubShots])
@@ -454,18 +480,88 @@ export default function Compare() {
           />
           Exclude mishits
         </label>
-        {excludeMishits && (hiddenRapsodoCount > 0 || hiddenOnCourseCount > 0) && (
+        {hiddenRapsodoCount > 0 || hiddenOnCourseCount > 0 ? (
           <span className="text-slate-500 text-xs">
             Hiding{' '}
-            {hiddenRapsodoCount > 0 && (
-              <span>{hiddenRapsodoCount} of {rapsodoShots.length} Rapsodo</span>
-            )}
+            {hiddenRapsodoCount > 0 && <span>{hiddenRapsodoCount} of {rapsodoShots.length} Rapsodo</span>}
             {hiddenRapsodoCount > 0 && hiddenOnCourseCount > 0 && <span>,  </span>}
-            {hiddenOnCourseCount > 0 && (
-              <span>{hiddenOnCourseCount} of {onCourseShots.length} on-course</span>
-            )}
+            {hiddenOnCourseCount > 0 && <span>{hiddenOnCourseCount} of {onCourseShots.length} on-course</span>}
             {' '}shots
           </span>
+        ) : null}
+      </div>
+
+      {/* Launch monitor filters */}
+      <div className="flex items-center gap-3 mb-3 flex-wrap bg-slate-900 border border-slate-700 rounded-lg px-3 py-2">
+        <span className="text-slate-400 text-xs font-semibold uppercase tracking-wide shrink-0">LM Filters</span>
+        <div className="flex items-center gap-1.5">
+          <label className="text-slate-400 text-xs">From</label>
+          <input
+            type="date"
+            value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)}
+            className="bg-slate-800 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <label className="text-slate-400 text-xs">To</label>
+          <input
+            type="date"
+            value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)}
+            className="bg-slate-800 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <label className="text-slate-400 text-xs">Sessions</label>
+          <select
+            value={lastNSessions ?? ''}
+            onChange={(e) => setLastNSessions(e.target.value ? Number(e.target.value) : null)}
+            className="bg-slate-800 text-slate-200 text-xs rounded px-2 py-1 border border-slate-600"
+          >
+            <option value="">All</option>
+            <option value="3">Last 3</option>
+            <option value="5">Last 5</option>
+            <option value="10">Last 10</option>
+            <option value="20">Last 20</option>
+          </select>
+        </div>
+        {clubBuckets.length > 0 && (
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-slate-400 text-xs">Effort</span>
+            {clubBuckets.map((b) => {
+              const key = String(b.bucket_index)
+              const active = enabledEfforts.has(key)
+              const color = bucketColor(b.bucket_index, clubBuckets.length)
+              return (
+                <button
+                  key={key}
+                  onClick={() => setEnabledEfforts((prev) => {
+                    const next = new Set(prev)
+                    next.has(key) ? next.delete(key) : next.add(key)
+                    return next
+                  })}
+                  className="px-2 py-0.5 rounded text-xs font-medium border transition-opacity"
+                  style={{
+                    borderColor: color,
+                    color: active ? color : '#475569',
+                    backgroundColor: active ? `${color}22` : 'transparent',
+                    opacity: active ? 1 : 0.45,
+                  }}
+                >
+                  {b.label}
+                </button>
+              )
+            })}
+          </div>
+        )}
+        {(dateFrom || dateTo || lastNSessions != null) && (
+          <button
+            onClick={() => { setDateFrom(''); setDateTo(''); setLastNSessions(null) }}
+            className="text-xs text-slate-500 hover:text-slate-300 ml-auto"
+          >
+            Clear
+          </button>
         )}
       </div>
       <p className="text-slate-500 text-xs mb-4">
@@ -495,14 +591,16 @@ export default function Compare() {
           subtitle={`x = side carry · y = total vs avg (${avgTotal.toFixed(0)} yds)`}
           pts={rapsodoPts}
           color="#4ade80"
-          axisMax={axisMax}
+          xAxisMax={xAxisMax}
+          yAxisMax={yAxisMax}
         />
         <ScatterPanel
           title="On-Course"
           subtitle={`x = offline (right/left) · y = distance vs avg (${avgDist.toFixed(0)} yds)`}
           pts={onCoursePts}
           color="#60a5fa"
-          axisMax={axisMax}
+          xAxisMax={xAxisMax}
+          yAxisMax={yAxisMax}
         />
       </div>
       {adjusted && <AdjustedFootnote elevation={settings.elevation_ft} temperature={settings.temperature_f} />}

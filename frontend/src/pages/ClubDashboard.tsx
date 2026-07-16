@@ -6,6 +6,8 @@ import {
 } from 'recharts'
 import { api } from '../api'
 import type { ClubStats, TrendPoint, ClubOption, Shot, SwingEffortBucket, UserSettings } from '../api'
+import { computeEllipses } from '../utils/ellipse'
+import type { EllipseResult } from '../utils/ellipse'
 import { useBag } from '../BagContext'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
@@ -129,97 +131,10 @@ function statsFromShots(shots: Shot[]): ClubStats | null {
   }
 }
 
-// ── PCA / ellipse helpers ──────────────────────────────────────────────────
+// ── Local types ───────────────────────────────────────────────────────────
 
 interface Point { x: number; y: number }
 interface ShotPoint extends Point { club_speed: number | null }
-
-interface Ellipse {
-  cx: number; cy: number  // data-space center
-  rx: number; ry: number  // data-space semi-axes
-  angleDeg: number        // rotation (degrees, CCW)
-  inlierCount: number
-}
-
-/**
- * Remove points whose squared Mahalanobis distance exceeds chi²(2, 0.90)
- * (= 4.605), giving a ~90% inlier threshold before the ellipse is drawn.
- * Uses Pearson correlation + per-axis std dev (the Pearson/σ method).
- */
-function filterOutliersPearson(pts: Point[]): Point[] {
-  if (pts.length < 4) return pts
-  const n = pts.length
-  const mx = pts.reduce((s, p) => s + p.x, 0) / n
-  const my = pts.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of pts) {
-    sxx += (p.x - mx) ** 2
-    syy += (p.y - my) ** 2
-    sxy += (p.x - mx) * (p.y - my)
-  }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-  const det = sxx * syy - sxy * sxy
-  if (det < 1e-10) return pts
-  // chi²(2, 0.90) ≈ 4.605
-  return pts.filter(p => {
-    const dx = p.x - mx, dy = p.y - my
-    const d2 = (syy * dx * dx - 2 * sxy * dx * dy + sxx * dy * dy) / det
-    return d2 <= 4.605
-  })
-}
-
-/**
- * Compute an 80% confidence ellipse via PCA of the covariance matrix.
- * chi²(2, 0.80) ≈ 3.219  →  scale = √3.219
- */
-function computeEllipse(pts: Point[]): Ellipse | null {
-  const inliers = filterOutliersPearson(pts)
-  if (inliers.length < 3) return null
-  const n = inliers.length
-  const mx = inliers.reduce((s, p) => s + p.x, 0) / n
-  const my = inliers.reduce((s, p) => s + p.y, 0) / n
-  let sxx = 0, syy = 0, sxy = 0
-  for (const p of inliers) {
-    sxx += (p.x - mx) ** 2
-    syy += (p.y - my) ** 2
-    sxy += (p.x - mx) * (p.y - my)
-  }
-  sxx /= n - 1; syy /= n - 1; sxy /= n - 1
-
-  // Eigenvalues of [[sxx, sxy],[sxy, syy]]
-  const trace = sxx + syy
-  const disc = Math.sqrt(Math.max(0, ((sxx - syy) / 2) ** 2 + sxy * sxy))
-  const lambda1 = trace / 2 + disc   // major axis variance
-  const lambda2 = trace / 2 - disc   // minor axis variance
-
-  // Angle of major eigenvector (atan2 form, matching screen coords)
-  const angleDeg = (Math.atan2(2 * sxy, sxx - syy) / 2) * (180 / Math.PI)
-
-  const scale = Math.sqrt(3.219)  // 80% chi² scale
-  return {
-    cx: mx, cy: my,
-    rx: Math.sqrt(Math.max(0, lambda1)) * scale,
-    ry: Math.sqrt(Math.max(0, lambda2)) * scale,
-    angleDeg,
-    inlierCount: n,
-  }
-}
-
-/** Generate N perimeter points of the ellipse in data space. */
-function ellipseOutlinePoints(e: Ellipse, n = 72): Point[] {
-  const rad = (e.angleDeg * Math.PI) / 180
-  const pts: Point[] = []
-  for (let i = 0; i <= n; i++) {
-    const t = (i / n) * 2 * Math.PI
-    const ex = e.rx * Math.cos(t)
-    const ey = e.ry * Math.sin(t)
-    pts.push({
-      x: e.cx + ex * Math.cos(rad) - ey * Math.sin(rad),
-      y: e.cy + ex * Math.sin(rad) + ey * Math.cos(rad),
-    })
-  }
-  return pts
-}
 
 // 8-color palette: index 1 = red (lowest effort), index N = blue (full effort)
 const BUCKET_PALETTE = ['#f87171', '#fb923c', '#facc15', '#a3e635', '#34d399', '#22d3ee', '#60a5fa', '#818cf8']
@@ -235,8 +150,7 @@ interface EffortDispersion {
   label: string
   color: string
   pts: ShotPoint[]
-  ellipse: Ellipse | null
-  ellipsePts: Point[]
+  ellipses: EllipseResult | null
   speedMin: number | null
   speedMax: number | null
 }
@@ -452,13 +366,16 @@ const EffortDispersionSection = memo(function EffortDispersionSection({
     <div className="mt-6 bg-slate-900 rounded-lg p-4 border border-slate-700">
       <div className="mb-4">
         <h2 className="text-white font-semibold">Dispersion by Swing Effort</h2>
-        <p className="text-slate-500 text-xs mt-1">80% confidence ellipse per effort level · outliers excluded</p>
+        <p className="text-slate-500 text-xs mt-1">50% · 75% · 95% confidence ellipses per effort level · outliers excluded</p>
         {(() => {
           const lowest = effortDisp[0]
           const highest = effortDisp[effortDisp.length - 1]
-          if (!lowest?.ellipse || !highest?.ellipse) return null
-          const deltaCarry = highest.ellipse.cy - lowest.ellipse.cy
-          const dispersalRatio = lowest.ellipse.rx > 0.1 ? highest.ellipse.rx / lowest.ellipse.rx : null
+          if (!lowest?.ellipses || !highest?.ellipses) return null
+          const deltaCarry = highest.ellipses.cy - lowest.ellipses.cy
+          // Use the 50% ellipse x-spread as the dispersion proxy (first entry in the array)
+          const lowestRx = lowest.ellipses.ellipses[0]?.points.reduce((max, p) => Math.max(max, Math.abs(p.x - lowest.ellipses!.cx)), 0) ?? 0
+          const highestRx = highest.ellipses.ellipses[0]?.points.reduce((max, p) => Math.max(max, Math.abs(p.x - highest.ellipses!.cx)), 0) ?? 0
+          const dispersalRatio = lowestRx > 0.1 ? highestRx / lowestRx : null
           return (
             <p className="text-slate-400 text-xs mt-1">
               {highest.label}: <span className="text-white">{deltaCarry >= 0 ? '+' : ''}{deltaCarry.toFixed(0)} yds carry</span> vs {lowest.label}
@@ -470,7 +387,7 @@ const EffortDispersionSection = memo(function EffortDispersionSection({
         })()}
       </div>
       <div className={`grid gap-4 ${effortDisp.length <= 2 ? 'grid-cols-1 sm:grid-cols-2' : effortDisp.length === 3 ? 'grid-cols-1 sm:grid-cols-3' : 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4'}`}>
-        {effortDisp.map(({ effortKey, label, color, pts, ellipse: ell, ellipsePts: ePts, speedMin, speedMax }) => (
+        {effortDisp.map(({ effortKey, label, color, pts, ellipses: ell, speedMin, speedMax }) => (
           <div key={effortKey} className="bg-slate-800 rounded-lg p-3 border border-slate-700">
             <div className="flex items-center justify-between mb-2">
               <div>
@@ -517,17 +434,35 @@ const EffortDispersionSection = memo(function EffortDispersionSection({
                   }}
                 />
                 <ReferenceLine x={0} stroke="#475569" />
-                {ePts.length > 0 && (
-                  <Scatter
-                    data={ePts}
-                    line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                    shape={() => null as unknown as React.ReactElement}
-                    fill="transparent"
-                    isAnimationActive={false}
-                    legendType="none"
-                  />
-                )}
                 <Scatter data={pts} fill={color} fillOpacity={0.7} isAnimationActive={false} />
+                {ell && (
+                  <>
+                    <Scatter
+                      data={ell.ellipses[2].points}
+                      line={{ stroke: 'rgba(255,255,255,0.65)', strokeWidth: 1.5, strokeDasharray: '4 2' }}
+                      shape={() => null as unknown as React.ReactElement}
+                      fill="transparent"
+                      isAnimationActive={false}
+                      legendType="none"
+                    />
+                    <Scatter
+                      data={ell.ellipses[1].points}
+                      line={{ stroke: 'rgba(255,255,255,0.82)', strokeWidth: 2.5, strokeDasharray: '6 2' }}
+                      shape={() => null as unknown as React.ReactElement}
+                      fill="transparent"
+                      isAnimationActive={false}
+                      legendType="none"
+                    />
+                    <Scatter
+                      data={ell.ellipses[0].points}
+                      line={{ stroke: 'rgba(255,255,255,1.0)', strokeWidth: 3 }}
+                      shape={() => null as unknown as React.ReactElement}
+                      fill="transparent"
+                      isAnimationActive={false}
+                      legendType="none"
+                    />
+                  </>
+                )}
               </ScatterChart>
             </ResponsiveContainer>
           </div>
@@ -730,10 +665,11 @@ export default function ClubDashboard() {
     return true
   }), [shots, globalDateFrom, globalDateTo])
 
-  // Date + effort filtered shots
+  // Date + effort filtered shots. Shots with no swing_effort label are always included
+  // since they cannot be assigned to an effort bucket (e.g. newly synced sessions).
   const filteredShots = useMemo(() => {
     if (enabledEfforts.size === 0 || clubBuckets.length === 0) return viewShots
-    return viewShots.filter((s) => s.swing_effort != null && enabledEfforts.has(s.swing_effort))
+    return viewShots.filter((s) => s.swing_effort == null || enabledEfforts.has(s.swing_effort))
   }, [viewShots, enabledEfforts, clubBuckets])
 
   const carryPercentiles = useMemo(() => {
@@ -991,8 +927,7 @@ export default function ClubDashboard() {
       .sort((a, b) => a.x - b.x)
   }, [filteredShots, adjusted])
 
-  const ellipse = useMemo(() => computeEllipse(dispersion), [dispersion])
-  const ellipsePts = useMemo(() => (ellipse ? ellipseOutlinePoints(ellipse) : []), [ellipse])
+  const ellipses = useMemo(() => computeEllipses(dispersion), [dispersion])
 
   // Derived: per-effort dispersion groups (replaces Effect C)
   const effortDisp = useMemo(() => {
@@ -1009,14 +944,14 @@ export default function ClubDashboard() {
         }))
         .sort((a, b) => a.x - b.x)
       if (ePts.length < 3) return []
-      const ell = computeEllipse(ePts)
+      const ell = computeEllipses(ePts)
       const speeds = ePts.map((p) => p.club_speed).filter((v): v is number => v != null)
       const speedMin = speeds.length ? Math.min(...speeds) : null
       const speedMax = speeds.length ? Math.max(...speeds) : null
       const bucketIdx = parseInt(effortKey)
       const label = clubBuckets.find((b) => b.bucket_index === bucketIdx)?.label ?? `Bucket ${effortKey}`
       const color = bucketColor(bucketIdx, totalBuckets || effortKeys.length)
-      return [{ effortKey, label, color, pts: ePts, ellipse: ell, ellipsePts: ell ? ellipseOutlinePoints(ell) : [], speedMin, speedMax }]
+      return [{ effortKey, label, color, pts: ePts, ellipses: ell, speedMin, speedMax }]
     })
     return groups.length >= 2 ? groups : []
   }, [viewShots, clubBuckets, adjusted])
@@ -1321,9 +1256,9 @@ export default function ClubDashboard() {
         <div className="bg-slate-900 rounded-lg p-4 border border-slate-700">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-white font-semibold">Shot Dispersion (Carry vs Side)</h2>
-            {ellipse && (
+            {ellipses && (
               <span className="text-slate-500 text-xs">
-                80% ellipse · {ellipse.inlierCount}/{dispersion.length} shots
+                50% · 75% · 95% confidence · {ellipses.inlierCount}/{dispersion.length} shots
               </span>
             )}
           </div>
@@ -1355,17 +1290,35 @@ export default function ClubDashboard() {
                 ]}
               />
               <ReferenceLine x={0} stroke="#475569" />
-              {ellipsePts.length > 0 && (
-                <Scatter
-                  data={ellipsePts}
-                  line={{ stroke: '#ffffff', strokeWidth: 1.5 }}
-                  shape={() => null as unknown as React.ReactElement}
-                  fill="transparent"
-                  isAnimationActive={false}
-                  legendType="none"
-                />
-              )}
               <Scatter data={dispersion} fill="#4ade80" fillOpacity={0.7} />
+              {ellipses && (
+                <>
+                  <Scatter
+                    data={ellipses.ellipses[2].points}
+                    line={{ stroke: 'rgba(255,255,255,0.65)', strokeWidth: 1.5, strokeDasharray: '4 2' }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    isAnimationActive={false}
+                    legendType="none"
+                  />
+                  <Scatter
+                    data={ellipses.ellipses[1].points}
+                    line={{ stroke: 'rgba(255,255,255,0.82)', strokeWidth: 2.5, strokeDasharray: '6 2' }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    isAnimationActive={false}
+                    legendType="none"
+                  />
+                  <Scatter
+                    data={ellipses.ellipses[0].points}
+                    line={{ stroke: 'rgba(255,255,255,1.0)', strokeWidth: 3 }}
+                    shape={() => null as unknown as React.ReactElement}
+                    fill="transparent"
+                    isAnimationActive={false}
+                    legendType="none"
+                  />
+                </>
+              )}
             </ScatterChart>
           </ResponsiveContainer>
         </div>
