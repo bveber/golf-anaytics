@@ -17,6 +17,7 @@ import boto3
 
 INSTANCE_ID = os.environ["INSTANCE_ID"]
 DOMAIN = os.environ["DOMAIN"]
+ORIGIN_CERT_PEM = os.environ["ORIGIN_CERT_PEM"]
 
 ec2 = boto3.client("ec2")
 
@@ -73,9 +74,12 @@ def _proxy(event, public_ip):
     elif body:
         body = body.encode()
 
-    # Connect by IP but present DOMAIN for SNI/Host so Caddy serves its real
-    # Let's Encrypt cert for the domain and cert validation succeeds normally.
-    ctx = ssl.create_default_context()
+    # Connect by IP but present DOMAIN for SNI/Host. Caddy can't get a public
+    # CA-trusted cert for DOMAIN here (ACME challenges must reach DOMAIN's
+    # public DNS answer, which points at API Gateway, not this instance), so
+    # instead of trusting the public CA chain we pin the exact self-signed
+    # cert Caddy was provisioned with (see terraform/origin_cert.tf).
+    ctx = ssl.create_default_context(cadata=ORIGIN_CERT_PEM)
     sock = socket.create_connection((public_ip, 443), timeout=10)
     ssock = ctx.wrap_socket(sock, server_hostname=DOMAIN)
 

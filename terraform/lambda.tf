@@ -16,8 +16,9 @@ resource "aws_lambda_function" "gateway" {
 
   environment {
     variables = {
-      INSTANCE_ID = aws_instance.app.id
-      DOMAIN      = var.domain_name
+      INSTANCE_ID     = aws_instance.app.id
+      DOMAIN          = var.domain_name
+      ORIGIN_CERT_PEM = tls_self_signed_cert.origin.cert_pem
     }
   }
 }

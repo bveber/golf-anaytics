@@ -53,7 +53,10 @@ dev: ## Run API + frontend together, tailing logs to logs/api.log and logs/front
 docker-build:
 	docker compose build
 
-docker-up:
+docker-up: ## Start via docker compose (generates a throwaway local cert on first run - prod fetches its real one from SSM via scripts/deploy.sh)
+	@mkdir -p certs
+	@[ -f certs/origin.crt ] || openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+		-keyout certs/origin.key -out certs/origin.crt -days 365 -nodes -subj "/CN=localhost"
 	docker compose up -d
 
 docker-down:

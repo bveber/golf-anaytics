@@ -1,6 +1,7 @@
 .env
 .rcloud_cookies.json
 .cookies/
+certs/
 db/golf_analytics.duckdb
 backups/
 __pycache__/
