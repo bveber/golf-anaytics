@@ -8,12 +8,17 @@ import { api } from '../api'
 import type { ClubStats, TrendPoint, ClubOption, Shot, SwingEffortBucket, UserSettings } from '../api'
 import { computeEllipses } from '../utils/ellipse'
 import type { EllipseResult } from '../utils/ellipse'
-import { useBag } from '../BagContext'
+import { useBag, bagKey } from '../BagContext'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'
 
 const CLUB_ORDER = ['d', '3w', '5w', '7w', '2h', '3h', '4h', '2i', '3i', '4i', '5i', '6i', '7i', '8i', '9i', 'pw', 'gw', 'sw', 'lw']
+
+function parseClubKey(key: string): { clubType: string; club: string } {
+  const idx = key.indexOf('|')
+  return idx === -1 ? { clubType: key, club: '' } : { clubType: key.slice(0, idx), club: key.slice(idx + 1) }
+}
 
 function sortClubs<T extends { club_type: string }>(list: T[]): T[] {
   return [...list].sort((a, b) => {
@@ -894,9 +899,12 @@ export default function ClubDashboard() {
       const sorted = sortClubs(list)
       setAllClubs(sorted)
       const fromUrl = searchParams.get('club')
-      const target = fromUrl && sorted.some((c) => c.club_type === fromUrl && isActive(c.club_type, c.club))
+      const target = fromUrl && sorted.some((c) => bagKey(c.club_type, c.club) === fromUrl && isActive(c.club_type, c.club))
         ? fromUrl
-        : sorted.find((c) => isActive(c.club_type, c.club))?.club_type ?? ''
+        : (() => {
+            const first = sorted.find((c) => isActive(c.club_type, c.club))
+            return first ? bagKey(first.club_type, first.club) : ''
+          })()
       setSelectedClub(target)
     })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -904,13 +912,18 @@ export default function ClubDashboard() {
   // Effect A — fetch raw shots + thresholds
   useEffect(() => {
     if (!selectedClub) return
+    const { clubType, club } = parseClubKey(selectedClub)
     const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
+    const shotsParams: Record<string, string> = {
+      ...(disabledParam ? { disabled_clubs: disabledParam } : {}),
+      ...(club ? { club } : {}),
+    }
     Promise.all([
-      api.shotsByClub(selectedClub, disabledParam ? { disabled_clubs: disabledParam } : undefined),
+      api.shotsByClub(clubType, Object.keys(shotsParams).length > 0 ? shotsParams : undefined),
       api.swingEffortThresholds(),
     ]).then(([fetched, allThresholds]) => {
       setShots(fetched)
-      const buckets = allThresholds.find((t) => t.club_type === selectedClub)?.buckets ?? []
+      const buckets = allThresholds.find((t) => t.club_type === clubType)?.buckets ?? []
       setClubBuckets(buckets)
       setEnabledEfforts(new Set(buckets.map((b) => String(b.bucket_index))))
     })
@@ -959,22 +972,24 @@ export default function ClubDashboard() {
   // Effect E — fetch trend data
   useEffect(() => {
     if (!selectedClub) return
+    const { clubType, club } = parseClubKey(selectedClub)
     const disabledParam = disabledClubs.size > 0 ? [...disabledClubs].join(',') : undefined
     const extraParams = {
       ...(disabledParam ? { disabled_clubs: disabledParam } : {}),
       ...(globalDateFrom ? { date_from: globalDateFrom } : {}),
       ...(globalDateTo   ? { date_to:   globalDateTo   } : {}),
+      ...(club ? { club } : {}),
     }
     Promise.all([
-      api.clubTrend(selectedClub, metric, extraParams),
-      api.clubTrend(selectedClub, 'club_speed', extraParams),
+      api.clubTrend(clubType, metric, extraParams),
+      api.clubTrend(clubType, 'club_speed', extraParams),
     ]).then(([metricTrend, csTrend]) => {
       setTrend(metricTrend)
       setSpeedTrend(csTrend)
     })
     Promise.all([
-      api.clubTrend(selectedClub, 'side_carry', extraParams),
-      api.clubTrend(selectedClub, 'carry_distance', extraParams),
+      api.clubTrend(clubType, 'side_carry', extraParams),
+      api.clubTrend(clubType, 'carry_distance', extraParams),
     ]).then(([side, carry]) => {
       const bySession: Record<string, DispersionPoint> = {}
       for (const pt of side) {
@@ -1003,7 +1018,7 @@ export default function ClubDashboard() {
     })
   }, [selectedClub, metric, disabledClubs, globalDateFrom, globalDateTo])
 
-  const clubName = clubs.find((c) => c.club_type === selectedClub)?.club ?? selectedClub
+  const clubName = parseClubKey(selectedClub).club || selectedClub
 
   // Derived: carry vs club speed regression chart data (replaces IIFE in JSX)
   const speedCarryChart = useMemo(() => {
@@ -1038,7 +1053,7 @@ export default function ClubDashboard() {
           className="bg-slate-800 text-white rounded px-3 py-1.5 text-sm border border-slate-600"
         >
           {clubs.map((c) => (
-            <option key={c.club_type} value={c.club_type}>
+            <option key={bagKey(c.club_type, c.club)} value={bagKey(c.club_type, c.club)}>
               {c.club} ({c.club_type})
             </option>
           ))}
