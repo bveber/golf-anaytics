@@ -35,6 +35,16 @@ data "aws_iam_policy_document" "ec2_app_policy" {
   }
 
   statement {
+    sid     = "OriginCertParams"
+    effect  = "Allow"
+    actions = ["ssm:GetParameter"]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-cert",
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-key",
+    ]
+  }
+
+  statement {
     sid       = "BackupsBucket"
     effect    = "Allow"
     actions   = ["s3:PutObject", "s3:GetObject", "s3:ListBucket"]
@@ -197,6 +207,20 @@ data "aws_iam_policy_document" "github_actions_policy" {
       "ssm:GetAutomationExecution",
     ]
     resources = ["*"]
+  }
+
+  statement {
+    sid    = "OriginCertParams"
+    effect = "Allow"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      "ssm:DeleteParameter",
+    ]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-cert",
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-key",
+    ]
   }
 
   statement {

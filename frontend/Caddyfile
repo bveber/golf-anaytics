@@ -1,4 +1,11 @@
 {$DOMAIN:localhost} {
+	# Automatic HTTPS can't work for this domain: ACME challenges must reach
+	# DOMAIN's public DNS answer, which points at API Gateway (so the domain
+	# stays stable across the EC2 instance's changing IP), not this instance.
+	# Use the self-signed cert Terraform provisions instead - the gateway
+	# Lambda pins this exact cert rather than trusting a public CA for it.
+	tls /certs/origin.crt /certs/origin.key
+
 	root * /srv
 	file_server
 	try_files {path} /index.html

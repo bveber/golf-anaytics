@@ -32,6 +32,7 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
+      - ./certs:/certs:ro
     restart: unless-stopped
 
 volumes:
