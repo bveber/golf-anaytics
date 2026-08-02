@@ -164,7 +164,13 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      # Pushes to main (deploy/apply workflows) plus pull_request-triggered
+      # runs (the plan-on-PR check) - pull_request's sub claim isn't tied to
+      # a specific branch or PR number, just "pull_request" itself.
+      values = [
+        "repo:${var.github_repo}:ref:refs/heads/main",
+        "repo:${var.github_repo}:pull_request",
+      ]
     }
   }
 }
