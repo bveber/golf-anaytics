@@ -102,9 +102,14 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list, user_id: int) -> dict:
     seen_tee_sets: set = set()
     seen_holes: set = set()
 
-    total_holes = 0
-    total_shots = 0
-    total_putts = 0
+    courses: list = []
+    tee_sets: list = []
+    rounds: list = []
+    holes: list = []
+    hole_stats: list = []
+    shots: list = []
+    putts: list = []
+    penalties: list = []
 
     for entry in data:
         course = entry.get("course", {})
@@ -115,30 +120,27 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list, user_id: int) -> dict:
         cid = course.get("id")
         if cid and cid not in seen_courses:
             seen_courses.add(cid)
-            conn.execute(
-                "INSERT INTO gt_courses VALUES (?,?,?,?,?,?)",
-                [user_id, cid, course.get("name"), course.get("city"),
-                 course.get("state"), course.get("holeCount")],
-            )
+            courses.append([
+                user_id, cid, course.get("name"), course.get("city"),
+                course.get("state"), course.get("holeCount"),
+            ])
 
         # ── Tee set ──
         tsid = tee_set.get("id")
         if tsid and tsid not in seen_tee_sets:
             seen_tee_sets.add(tsid)
-            conn.execute(
-                "INSERT INTO gt_tee_sets VALUES (?,?,?,?,?,?)",
-                [user_id, tsid, tee_set.get("courseId"), tee_set.get("name"),
-                 tee_set.get("rating"), tee_set.get("slope")],
-            )
+            tee_sets.append([
+                user_id, tsid, tee_set.get("courseId"), tee_set.get("name"),
+                tee_set.get("rating"), tee_set.get("slope"),
+            ])
 
         # ── Round ──
         rid = rnd.get("id")
-        conn.execute(
-            "INSERT INTO gt_rounds VALUES (?,?,?,?,?,?,?,?,?,?)",
-            [user_id, rid, rnd.get("courseId"), rnd.get("teeSetId"),
-             rnd.get("date"), rnd.get("isFinalized"), rnd.get("isPractice"),
-             rnd.get("notes", ""), rnd.get("startHole"), rnd.get("totalHoles")],
-        )
+        rounds.append([
+            user_id, rid, rnd.get("courseId"), rnd.get("teeSetId"),
+            rnd.get("date"), rnd.get("isFinalized"), rnd.get("isPractice"),
+            rnd.get("notes", ""), rnd.get("startHole"), rnd.get("totalHoles"),
+        ])
 
         # ── Holes + hole stats ──
         for hs_entry in entry.get("holeStats", []):
@@ -149,85 +151,94 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list, user_id: int) -> dict:
             hid = hole.get("id")
             if hid and hid not in seen_holes:
                 seen_holes.add(hid)
-                conn.execute(
-                    "INSERT INTO gt_holes VALUES (?,?,?,?,?,?,?,?,?,?)",
-                    [user_id, hid, hole.get("courseId"), hole.get("holeNumber"),
-                     hole.get("par"), hole.get("handicapIndex"),
-                     hole.get("teeLat"), hole.get("teeLng"),
-                     hole.get("greenLat"), hole.get("greenLng")],
-                )
+                holes.append([
+                    user_id, hid, hole.get("courseId"), hole.get("holeNumber"),
+                    hole.get("par"), hole.get("handicapIndex"),
+                    hole.get("teeLat"), hole.get("teeLng"),
+                    hole.get("greenLat"), hole.get("greenLng"),
+                ])
 
             hsid = hs.get("id")
-            conn.execute(
-                """INSERT INTO gt_hole_stats VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                [
-                    user_id, hsid, rid, hid,
-                    hs.get("score"), hs.get("scoreManual"), hs.get("isScored"),
-                    hs.get("putts"), hs.get("chips"), hs.get("sandShots"),
-                    hs.get("gir"), hs.get("nearGir"), hs.get("girOverride"),
-                    hs.get("approachMishit"), hs.get("recoveryChip"),
-                    hs.get("adjustedYardage"), hs.get("chipDistance"), hs.get("chipLie"),
-                    hs.get("teeClubId"), hs.get("teeShotDistance"), hs.get("teeOutcome"),
-                    hs.get("teeMishit"), hs.get("teeInTrouble"),
-                    hs.get("teeLat"), hs.get("teeLng"),
-                    hs.get("teeDispersionLeft"), hs.get("teeDispersionRight"),
-                    hs.get("teeDispersionLong"), hs.get("teeDispersionShort"),
-                    hs.get("sgApproach"), hs.get("sgAroundGreen"),
-                    hs.get("sgOffTee"), hs.get("sgOffTeeExpected"),
-                    hs.get("sgPutting"), hs.get("strokesGained"),
-                    hs.get("difficultyAdjustment"),
-                ],
-            )
-            total_holes += 1
+            hole_stats.append([
+                user_id, hsid, rid, hid,
+                hs.get("score"), hs.get("scoreManual"), hs.get("isScored"),
+                hs.get("putts"), hs.get("chips"), hs.get("sandShots"),
+                hs.get("gir"), hs.get("nearGir"), hs.get("girOverride"),
+                hs.get("approachMishit"), hs.get("recoveryChip"),
+                hs.get("adjustedYardage"), hs.get("chipDistance"), hs.get("chipLie"),
+                hs.get("teeClubId"), hs.get("teeShotDistance"), hs.get("teeOutcome"),
+                hs.get("teeMishit"), hs.get("teeInTrouble"),
+                hs.get("teeLat"), hs.get("teeLng"),
+                hs.get("teeDispersionLeft"), hs.get("teeDispersionRight"),
+                hs.get("teeDispersionLong"), hs.get("teeDispersionShort"),
+                hs.get("sgApproach"), hs.get("sgAroundGreen"),
+                hs.get("sgOffTee"), hs.get("sgOffTeeExpected"),
+                hs.get("sgPutting"), hs.get("strokesGained"),
+                hs.get("difficultyAdjustment"),
+            ])
 
             # Shots
             for shot in hs_entry.get("shots", []):
-                conn.execute(
-                    """INSERT INTO gt_shots VALUES
-                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                    [
-                        user_id, shot.get("id"), hsid, shot.get("shotNumber"),
-                        shot.get("clubId"),
-                        shot.get("distanceToPin"), shot.get("distanceTraveled"),
-                        shot.get("lie"), shot.get("outcome"),
-                        shot.get("isMishit"), shot.get("isRecovery"),
-                        shot.get("strokesGained"), shot.get("penaltyAttribution"),
-                        shot.get("startLat"), shot.get("startLng"),
-                        shot.get("targetLat"), shot.get("targetLng"),
-                        shot.get("dispersionLeft"), shot.get("dispersionRight"),
-                        shot.get("dispersionLong"), shot.get("dispersionShort"),
-                    ],
-                )
-                total_shots += 1
+                shots.append([
+                    user_id, shot.get("id"), hsid, shot.get("shotNumber"),
+                    shot.get("clubId"),
+                    shot.get("distanceToPin"), shot.get("distanceTraveled"),
+                    shot.get("lie"), shot.get("outcome"),
+                    shot.get("isMishit"), shot.get("isRecovery"),
+                    shot.get("strokesGained"), shot.get("penaltyAttribution"),
+                    shot.get("startLat"), shot.get("startLng"),
+                    shot.get("targetLat"), shot.get("targetLng"),
+                    shot.get("dispersionLeft"), shot.get("dispersionRight"),
+                    shot.get("dispersionLong"), shot.get("dispersionShort"),
+                ])
 
             # Putts
             for putt in hs_entry.get("putts", []):
-                conn.execute(
-                    "INSERT INTO gt_putts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    [
-                        user_id, putt.get("id"), hsid, putt.get("puttNumber"),
-                        putt.get("distance"), putt.get("made"),
-                        putt.get("strokesGained"),
-                        putt.get("breakDirection"), putt.get("directionMiss"),
-                        putt.get("paceMiss"), putt.get("slopeDirection"),
-                    ],
-                )
-                total_putts += 1
+                putts.append([
+                    user_id, putt.get("id"), hsid, putt.get("puttNumber"),
+                    putt.get("distance"), putt.get("made"),
+                    putt.get("strokesGained"),
+                    putt.get("breakDirection"), putt.get("directionMiss"),
+                    putt.get("paceMiss"), putt.get("slopeDirection"),
+                ])
 
             # Penalties
             for pen in hs_entry.get("penalties", []):
-                conn.execute(
-                    "INSERT INTO gt_penalties VALUES (?,?,?,?,?,?)",
-                    [user_id, pen.get("id"), hsid, pen.get("shotNumber"),
-                     pen.get("strokes"), pen.get("type")],
-                )
+                penalties.append([
+                    user_id, pen.get("id"), hsid, pen.get("shotNumber"),
+                    pen.get("strokes"), pen.get("type"),
+                ])
+
+    if courses:
+        conn.executemany("INSERT INTO gt_courses VALUES (?,?,?,?,?,?)", courses)
+    if tee_sets:
+        conn.executemany("INSERT INTO gt_tee_sets VALUES (?,?,?,?,?,?)", tee_sets)
+    if rounds:
+        conn.executemany("INSERT INTO gt_rounds VALUES (?,?,?,?,?,?,?,?,?,?)", rounds)
+    if holes:
+        conn.executemany("INSERT INTO gt_holes VALUES (?,?,?,?,?,?,?,?,?,?)", holes)
+    if hole_stats:
+        conn.executemany(
+            """INSERT INTO gt_hole_stats VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            hole_stats,
+        )
+    if shots:
+        conn.executemany(
+            """INSERT INTO gt_shots VALUES
+            (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            shots,
+        )
+    if putts:
+        conn.executemany("INSERT INTO gt_putts VALUES (?,?,?,?,?,?,?,?,?,?,?)", putts)
+    if penalties:
+        conn.executemany("INSERT INTO gt_penalties VALUES (?,?,?,?,?,?)", penalties)
 
     return {
         "rounds": len(data),
-        "holes": total_holes,
-        "shots": total_shots,
-        "putts": total_putts,
+        "holes": len(hole_stats),
+        "shots": len(shots),
+        "putts": len(putts),
     }
 
 
