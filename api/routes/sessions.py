@@ -1,8 +1,10 @@
+from __future__ import annotations
+
 from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional
 from api.auth import get_current_user_id
 from api.db import get_conn
-from api.models import Session
+from api.models import Session, SessionDateUpdate
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -52,3 +54,20 @@ def get_session(session_id: str, user_id: int = Depends(get_current_user_id)):
         raise HTTPException(status_code=404, detail="Session not found")
     cols = ["session_id", "session_date", "session_type", "notes", "scraped_at", "shot_count"]
     return Session(**dict(zip(cols, row)))
+
+
+@router.patch("/{session_id}/date")
+def update_session_date(
+    session_id: str, body: SessionDateUpdate, user_id: int = Depends(get_current_user_id)
+):
+    conn = get_conn()
+    exists = conn.execute(
+        "SELECT 1 FROM sessions WHERE session_id = ? AND user_id = ?", [session_id, user_id]
+    ).fetchone()
+    if not exists:
+        raise HTTPException(status_code=404, detail="Session not found")
+    conn.execute(
+        "UPDATE sessions SET session_date = ? WHERE session_id = ?",
+        [body.session_date, session_id],
+    )
+    return {"ok": True}

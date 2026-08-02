@@ -282,6 +282,13 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_outlier: isOutlier, outlier_note: note ?? null }),
     }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
+  updateSessionDate: (sessionId: string, sessionDate: string) =>
+    fetch(`${BASE}/sessions/${encodeURIComponent(sessionId)}/date`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_date: sessionDate }),
+    }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
   rcloudCredentialsStatus: () => get<{ configured: boolean }>('/settings/rcloud-credentials/status'),
   setRcloudCredentials: (email: string, password: string) =>
     fetch(`${BASE}/settings/rcloud-credentials`, {

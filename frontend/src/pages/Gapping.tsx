@@ -5,7 +5,7 @@ import {
 } from 'recharts'
 import { api } from '../api'
 import type { ClubStats, MatrixRow, Shot, UserSettings } from '../api'
-import { useBag } from '../BagContext'
+import { useBag } from '../hooks/useBag'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'

@@ -1,50 +1,20 @@
-import { createContext, useContext, useEffect, useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
+import { AuthContext } from './hooks/useAuth'
+import type { AuthUser } from './hooks/useAuth'
 
 const BASE = '/api'
-
-interface AuthUser {
-  email: string
-  display_name: string | null
-}
-
-interface AuthContextValue {
-  user: AuthUser | null
-  isAuthenticated: boolean
-  loading: boolean
-  loginWithGoogleIdToken: (idToken: string) => Promise<void>
-  logout: () => Promise<void>
-}
-
-const AuthContext = createContext<AuthContextValue>({
-  user: null,
-  isAuthenticated: false,
-  loading: true,
-  loginWithGoogleIdToken: async () => {},
-  logout: async () => {},
-})
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [loading, setLoading] = useState(true)
 
-  async function refreshMe() {
-    try {
-      const res = await fetch(`${BASE}/auth/me`, { credentials: 'include' })
-      if (res.ok) {
-        setUser(await res.json())
-      } else {
-        setUser(null)
-      }
-    } catch {
-      setUser(null)
-    } finally {
-      setLoading(false)
-    }
-  }
-
   useEffect(() => {
-    refreshMe()
+    fetch(`${BASE}/auth/me`, { credentials: 'include' })
+      .then((res) => (res.ok ? res.json() : null))
+      .then(setUser)
+      .catch(() => setUser(null))
+      .finally(() => setLoading(false))
   }, [])
 
   async function loginWithGoogleIdToken(idToken: string) {
@@ -71,5 +41,3 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     </AuthContext.Provider>
   )
 }
-
-export const useAuth = () => useContext(AuthContext)

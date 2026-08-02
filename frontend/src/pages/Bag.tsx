@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import type { ClubStats, ClubOption, UserSettings } from '../api'
-import { useBag, bagKey } from '../BagContext'
+import { useBag, bagKey } from '../hooks/useBag'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'

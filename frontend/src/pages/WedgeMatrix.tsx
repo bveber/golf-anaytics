@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ChangeEvent } from 'react'
 import { api } from '../api'
 import type { MatrixRow, UserSettings } from '../api'
-import { useBag } from '../BagContext'
+import { useBag } from '../hooks/useBag'
 import AdjustedFootnote from '../components/AdjustedFootnote'
 
 const BUCKET_PALETTE = ['#f87171', '#fb923c', '#facc15', '#a3e635', '#34d399', '#22d3ee', '#60a5fa', '#818cf8']

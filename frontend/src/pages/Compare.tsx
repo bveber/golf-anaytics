@@ -370,9 +370,12 @@ export default function Compare() {
   )
 
   // Reset the specific-model selection back to "All" whenever the category changes.
-  useEffect(() => {
+  // Adjusted during render (not in an effect) per https://react.dev/learn/you-might-not-need-an-effect
+  const [prevSelectedClub, setPrevSelectedClub] = useState(selectedClub)
+  if (selectedClub !== prevSelectedClub) {
+    setPrevSelectedClub(selectedClub)
     setSelectedModel('')
-  }, [selectedClub])
+  }
 
   useEffect(() => {
     api.sessions().then((sessions) => {
@@ -391,15 +394,14 @@ export default function Compare() {
   }, [])
 
   useEffect(() => {
-    setRapsodoShots([])
-    setOnCourseShots([])
-
+    let ignore = false
     const clubIds = REVERSE_MAP[selectedClub] ?? []
 
     Promise.all([
       api.shotsByClub(selectedClub, selectedModel ? { club: selectedModel } : undefined),
       api.swingEffortThresholds(),
     ]).then(([shots, allThresholds]) => {
+      if (ignore) return
       setRapsodoShots(shots)
       const buckets = allThresholds.find((t) => t.club_type === selectedClub)?.buckets ?? []
       setClubBuckets(buckets)
@@ -407,8 +409,10 @@ export default function Compare() {
     }).catch(() => {})
 
     Promise.all(clubIds.map((id) => api.gtShots(id)))
-      .then((results) => setOnCourseShots(results.flat()))
+      .then((results) => { if (!ignore) setOnCourseShots(results.flat()) })
       .catch(() => {})
+
+    return () => { ignore = true }
   }, [selectedClub, selectedModel])
 
   const sortedSessionIds = useMemo(() => {
@@ -568,7 +572,11 @@ export default function Compare() {
                   key={key}
                   onClick={() => setEnabledEfforts((prev) => {
                     const next = new Set(prev)
-                    next.has(key) ? next.delete(key) : next.add(key)
+                    if (next.has(key)) {
+                      next.delete(key)
+                    } else {
+                      next.add(key)
+                    }
                     return next
                   })}
                   className="px-2 py-0.5 rounded text-xs font-medium border transition-opacity"
