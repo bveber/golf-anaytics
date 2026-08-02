@@ -213,6 +213,7 @@ def club_trend(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     disabled_clubs: Optional[str] = None,
+    club: Optional[str] = None,
 ):
     allowed = {
         "carry_distance", "total_distance", "ball_speed", "launch_angle",
@@ -229,6 +230,9 @@ def club_trend(
 
     if not include_outliers:
         conditions.append("sh.is_outlier = false")
+    if club:
+        conditions.append("sh.club = ?")
+        params.append(club)
     if date_from:
         conditions.append("s.session_date >= ?")
         params.append(date_from)

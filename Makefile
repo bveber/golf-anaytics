@@ -13,6 +13,7 @@ help:
 	@echo "  make scheduler     Start the nightly scheduler daemon"
 	@echo "  make api           Run FastAPI backend (port 8000)"
 	@echo "  make frontend      Run React frontend (port 5173)"
+	@echo "  make dev           Run API + frontend together, logs in logs/"
 
 debug: $(VENV)/bin/activate
 	$(PYTHON) debug_scraper.py
@@ -46,5 +47,5 @@ api: $(VENV)/bin/activate
 frontend:
 	cd frontend && npm run dev
 
-dev: ## Run API + frontend in parallel (requires tmux or two terminals)
-	@echo "Start 'make api' in one terminal and 'make frontend' in another."
+dev: ## Run API + frontend together, tailing logs to logs/api.log and logs/frontend.log
+	@bash scripts/dev.sh

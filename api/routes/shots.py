@@ -40,6 +40,7 @@ def get_shots_by_club(
     effort: Optional[str] = None,
     disabled_clubs: Optional[str] = None,
     limit_sessions: Optional[int] = None,
+    club: Optional[str] = None,
 ) -> list[CorrectedShot]:
     conn = get_conn()
     conditions = ["sh.club_type = ?"]
@@ -47,6 +48,9 @@ def get_shots_by_club(
 
     if not include_outliers:
         conditions.append("sh.is_outlier = false")
+    if club:
+        conditions.append("sh.club = ?")
+        params.append(club)
     if effort:
         buckets = [e.strip() for e in effort.split(",")]
         placeholders = ",".join("?" * len(buckets))

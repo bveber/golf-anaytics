@@ -4,7 +4,7 @@ import {
   Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { api } from '../api'
-import type { Shot, GtShot, Session, UserSettings, SwingEffortBucket } from '../api'
+import type { Shot, GtShot, Session, UserSettings, SwingEffortBucket, ClubOption } from '../api'
 import { useAdjusted } from '../hooks/useAdjusted'
 import AdjustedToggle from '../components/AdjustedToggle'
 import AdjustedFootnote from '../components/AdjustedFootnote'
@@ -351,10 +351,28 @@ export default function Compare() {
   const [lastNSessions, setLastNSessions] = useState<number | null>(null)
   const [clubBuckets, setClubBuckets] = useState<SwingEffortBucket[]>([])
   const [enabledEfforts, setEnabledEfforts] = useState<Set<string>>(new Set())
+  const [allClubOptions, setAllClubOptions] = useState<ClubOption[]>([])
+  const [selectedModel, setSelectedModel] = useState<string>('')
 
   useEffect(() => {
     api.getSettings().then(setSettings)
   }, [])
+
+  useEffect(() => {
+    api.clubList().then(setAllClubOptions).catch(() => {})
+  }, [])
+
+  // Distinct physical-club models for the currently selected category. Only relevant
+  // when a category (e.g. driver) has more than one distinct `club` model in the bag.
+  const modelsForSelectedClub = useMemo(
+    () => [...new Set(allClubOptions.filter((c) => c.club_type === selectedClub).map((c) => c.club))],
+    [allClubOptions, selectedClub]
+  )
+
+  // Reset the specific-model selection back to "All" whenever the category changes.
+  useEffect(() => {
+    setSelectedModel('')
+  }, [selectedClub])
 
   useEffect(() => {
     api.sessions().then((sessions) => {
@@ -379,7 +397,7 @@ export default function Compare() {
     const clubIds = REVERSE_MAP[selectedClub] ?? []
 
     Promise.all([
-      api.shotsByClub(selectedClub),
+      api.shotsByClub(selectedClub, selectedModel ? { club: selectedModel } : undefined),
       api.swingEffortThresholds(),
     ]).then(([shots, allThresholds]) => {
       setRapsodoShots(shots)
@@ -391,7 +409,7 @@ export default function Compare() {
     Promise.all(clubIds.map((id) => api.gtShots(id)))
       .then((results) => setOnCourseShots(results.flat()))
       .catch(() => {})
-  }, [selectedClub])
+  }, [selectedClub, selectedModel])
 
   const sortedSessionIds = useMemo(() => {
     const seen = new Set<string>()
@@ -471,6 +489,18 @@ export default function Compare() {
             <option key={c} value={c}>{CLUB_LABELS[c] ?? c} ({c})</option>
           ))}
         </select>
+        {modelsForSelectedClub.length > 1 && (
+          <select
+            value={selectedModel}
+            onChange={(e) => setSelectedModel(e.target.value)}
+            className="bg-slate-800 text-white rounded px-3 py-1.5 text-sm border border-slate-600"
+          >
+            <option value="">All models</option>
+            {modelsForSelectedClub.map((model) => (
+              <option key={model} value={model}>{model}</option>
+            ))}
+          </select>
+        )}
         <label className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none">
           <input
             type="checkbox"
