@@ -211,7 +211,8 @@ export default function SettingsModal({ onClose, onSaved }: Props): React.ReactE
               <p className="text-slate-400 text-sm mt-2">
                 {syncJob.status === 'success' && `Done — ${syncJob.result}`}
                 {syncJob.status === 'failed' && `Failed — ${syncJob.error}`}
-                {(syncJob.status === 'queued' || syncJob.status === 'running') && 'Sync in progress…'}
+                {syncJob.status === 'queued' && 'Queued…'}
+                {syncJob.status === 'running' && (syncJob.progress ?? 'Starting sync…')}
               </p>
             )}
           </>

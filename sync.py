@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Callable
 
 import click
 from dotenv import load_dotenv
@@ -26,9 +27,15 @@ def run_sync_for_user(
     headless: bool = True,
     dry_run: bool = False,
     session_id: str | None = None,
+    progress_callback: Callable[[str], None] | None = None,
 ) -> int:
     """Run a sync for one user's Rapsodo account. Returns the number of new shots ingested."""
     _validate_env()
+
+    def report(message: str) -> None:
+        click.echo(f"[user {user_id}] {message}")
+        if progress_callback:
+            progress_callback(message)
 
     from api.secrets import get_rcloud_credentials
     from scraper.auth import login
@@ -54,35 +61,36 @@ def run_sync_for_user(
         context = browser.new_context(accept_downloads=True)
         page = context.new_page()
 
-        click.echo(f"[user {user_id}] Logging in to r-cloud...")
+        report("Logging in to r-cloud...")
         login(page, context, email, password, base_url, login_url, cookie_path)
-        click.echo(f"[user {user_id}] Authenticated.")
+        report("Authenticated.")
 
         if session_id:
             # Force-sync a single session by constructing a minimal RemoteSession.
             # session_date and session_type will be populated from the CSV or left blank.
             sessions = [RemoteSession(session_id=session_id, session_date="", session_type="Practice")]
-            click.echo(f"[user {user_id}] Force-syncing session {session_id}")
+            report(f"Force-syncing session {session_id}")
         else:
-            click.echo(f"[user {user_id}] Discovering new sessions...")
+            report("Discovering new sessions...")
             sessions = get_new_sessions(page, base_url, user_id)
-            click.echo(f"[user {user_id}] Found {len(sessions)} new session(s).")
+            report(f"Found {len(sessions)} new session(s).")
 
         for i, session in enumerate(sessions, 1):
-            click.echo(f"[user {user_id}] [{i}/{len(sessions)}] Session {session.session_id} ({session.session_type})")
+            report(f"Downloading session {i}/{len(sessions)}: {session.session_id} ({session.session_type})")
             csv_path = download_session_csv(page, session, backup_dir, base_url, user_id)
             parsed = parse_csv(csv_path, session.session_id, session.session_date, session.session_type)
 
             if not dry_run:
                 n = load_session(parsed, user_id)
-                click.echo(f"[user {user_id}]   Loaded {n} new shots")
+                report(f"Loaded {n} new shot(s) from session {i}/{len(sessions)}")
                 total_shots += n
             else:
-                click.echo(f"[user {user_id}]   [dry-run] parsed {len(parsed.shots)} shots, skipping DB write")
+                report(f"[dry-run] parsed {len(parsed.shots)} shots from session {i}/{len(sessions)}, skipping DB write")
 
         browser.close()
 
     if not dry_run and total_shots > 0:
+        report("Backing up database...")
         backup_db()
 
     return total_shots

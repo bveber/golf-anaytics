@@ -310,4 +310,5 @@ export interface SyncJob {
   finished_at: string | null
   result: string | null
   error: string | null
+  progress: string | null
 }
