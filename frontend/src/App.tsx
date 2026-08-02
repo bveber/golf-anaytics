@@ -11,11 +11,14 @@ import WedgeMatrix from './pages/WedgeMatrix'
 import Compare from './pages/Compare'
 import SessionClubs from './pages/SessionClubs'
 import Bag from './pages/Bag'
+import Login from './pages/Login'
 import { BagProvider } from './BagContext'
+import { AuthProvider, useAuth } from './AuthContext'
 import SettingsModal from './components/SettingsModal'
 
 function Nav() {
   const [showSettings, setShowSettings] = useState(false)
+  const { user, logout } = useAuth()
   const cls = ({ isActive }: { isActive: boolean }) =>
     `px-4 py-2 rounded text-sm font-medium transition-colors ${
       isActive ? 'bg-green-700 text-white' : 'text-slate-400 hover:text-white'
@@ -32,6 +35,12 @@ function Nav() {
       <NavLink to="/compare" className={cls}>Compare</NavLink>
       <NavLink to="/bag" className={cls}>Bag</NavLink>
       <button onClick={() => setShowSettings(true)} className="ml-auto text-slate-400 hover:text-white text-lg px-2" title="Conditions">⚙</button>
+      {user && (
+        <div className="flex items-center gap-2 text-sm text-slate-400">
+          <span>{user.email}</span>
+          <button onClick={() => logout()} className="hover:text-white" title="Sign out">Sign out</button>
+        </div>
+      )}
       {showSettings && (
         <SettingsModal
           onClose={() => setShowSettings(false)}
@@ -42,29 +51,44 @@ function Nav() {
   )
 }
 
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, loading } = useAuth()
+  if (loading) {
+    return <div className="min-h-screen bg-slate-950" />
+  }
+  if (!isAuthenticated) {
+    return <Login />
+  }
+  return <>{children}</>
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <BagProvider>
-      <div className="min-h-screen bg-slate-950 text-slate-100">
-        <Nav />
-        <div className="p-6">
-          <Routes>
-            <Route path="/" element={<SessionBrowser />} />
-            <Route path="/session/:id" element={<SessionSummary />} />
-            <Route path="/session/:id/clubs" element={<SessionClubs />} />
-            <Route path="/clubs" element={<ClubDashboard />} />
-            <Route path="/gapping" element={<Gapping />} />
-            <Route path="/swing-effort" element={<SwingEffort />} />
-            <Route path="/wedge-matrix" element={<WedgeMatrix />} />
-            <Route path="/rounds" element={<Rounds />} />
-            <Route path="/rounds/:id" element={<RoundDetail />} />
-            <Route path="/compare" element={<Compare />} />
-            <Route path="/bag" element={<Bag />} />
-          </Routes>
-        </div>
-      </div>
-      </BagProvider>
+      <AuthProvider>
+        <AuthGate>
+          <BagProvider>
+            <div className="min-h-screen bg-slate-950 text-slate-100">
+              <Nav />
+              <div className="p-6">
+                <Routes>
+                  <Route path="/" element={<SessionBrowser />} />
+                  <Route path="/session/:id" element={<SessionSummary />} />
+                  <Route path="/session/:id/clubs" element={<SessionClubs />} />
+                  <Route path="/clubs" element={<ClubDashboard />} />
+                  <Route path="/gapping" element={<Gapping />} />
+                  <Route path="/swing-effort" element={<SwingEffort />} />
+                  <Route path="/wedge-matrix" element={<WedgeMatrix />} />
+                  <Route path="/rounds" element={<Rounds />} />
+                  <Route path="/rounds/:id" element={<RoundDetail />} />
+                  <Route path="/compare" element={<Compare />} />
+                  <Route path="/bag" element={<Bag />} />
+                </Routes>
+              </div>
+            </div>
+          </BagProvider>
+        </AuthGate>
+      </AuthProvider>
     </BrowserRouter>
   )
 }
