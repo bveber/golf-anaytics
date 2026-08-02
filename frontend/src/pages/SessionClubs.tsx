@@ -144,7 +144,7 @@ export default function SessionClubs() {
   const [selectedClubType, setSelectedClubType] = useState<string | null>(null)
   const [historicalShots, setHistoricalShots] = useState<Shot[]>([])
   const [historicalStats, setHistoricalStats] = useState<ClubStats | null>(null)
-  const [loadingDispersion, setLoadingDispersion] = useState(false)
+  const [loadedClubType, setLoadedClubType] = useState<string | null>(null)
   const [distanceMetric, setDistanceMetric] = useState<'carry' | 'total'>('carry')
 
   useEffect(() => {
@@ -165,16 +165,20 @@ export default function SessionClubs() {
 
   useEffect(() => {
     if (!selectedClubType) return
-    setLoadingDispersion(true)
+    let ignore = false
     Promise.all([
       api.shotsByClub(selectedClubType),
       api.clubStats(),
     ]).then(([shots, allStats]) => {
+      if (ignore) return
       setHistoricalShots(shots)
       setHistoricalStats(allStats.find((s) => s.club_type === selectedClubType) ?? null)
-      setLoadingDispersion(false)
+      setLoadedClubType(selectedClubType)
     })
+    return () => { ignore = true }
   }, [selectedClubType])
+
+  const loadingDispersion = selectedClubType !== null && loadedClubType !== selectedClubType
 
   async function toggleOutlier(shot: Shot) {
     const newVal = !shot.is_outlier

@@ -87,7 +87,7 @@ export default function RoundDetail() {
   useEffect(() => {
     if (!id) return
     api.gtRound(Number(id)).then(setDetail).catch(() => navigate('/rounds'))
-  }, [id])
+  }, [id, navigate])
 
   if (!detail) return null
 
@@ -204,10 +204,10 @@ export default function RoundDetail() {
                   data={dispPts}
                   fill="#4ade80"
                   fillOpacity={0.75}
-                  shape={(props: any) => {
+                  shape={(props: { cx?: number; cy?: number; payload?: { outcome: string | null } }) => {
                     const { cx, cy, payload } = props
-                    const color = payload.outcome === 'ON_TARGET' ? '#4ade80'
-                      : payload.outcome?.includes('MISS') ? '#f87171' : '#facc15'
+                    const color = payload?.outcome === 'ON_TARGET' ? '#4ade80'
+                      : payload?.outcome?.includes('MISS') ? '#f87171' : '#facc15'
                     return <circle cx={cx} cy={cy} r={5} fill={color} fillOpacity={0.8} />
                   }}
                 />

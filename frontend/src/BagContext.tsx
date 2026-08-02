@@ -1,23 +1,6 @@
-import { createContext, useContext, useState } from 'react'
+import { useState } from 'react'
 import type { ReactNode } from 'react'
-
-// Key format: "{club_type}|{club}" e.g. "lw|TaylorMade Hi-Toe"
-export function bagKey(clubType: string, club: string) {
-  return `${clubType}|${club}`
-}
-
-interface BagContextValue {
-  disabledClubs: Set<string>
-  toggleClub: (clubType: string, club: string) => void
-  isActive: (clubType: string, club: string) => boolean
-}
-
-const BagContext = createContext<BagContextValue>({
-  disabledClubs: new Set(),
-  toggleClub: () => {},
-  isActive: () => true,
-})
-
+import { BagContext, bagKey } from './hooks/useBag'
 
 export function BagProvider({ children }: { children: ReactNode }) {
   const [disabledClubs, setDisabledClubs] = useState<Set<string>>(() => {
@@ -49,5 +32,3 @@ export function BagProvider({ children }: { children: ReactNode }) {
     </BagContext.Provider>
   )
 }
-
-export const useBag = () => useContext(BagContext)

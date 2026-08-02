@@ -45,6 +45,8 @@ export default function SessionSummary() {
   const [shots, setShots] = useState<Shot[]>([])
   const [editing, setEditing] = useState<string | null>(null)
   const [noteText, setNoteText] = useState('')
+  const [editingDate, setEditingDate] = useState(false)
+  const [dateInput, setDateInput] = useState('')
   const [sort, setSort] = useState<SortState>({ key: 'shot_number', dir: 'asc' })
   const [settings, setSettings] = useState<UserSettings>({ elevation_ft: 900, temperature_f: 70 })
   const { adjusted, toggleAdjusted } = useAdjusted()
@@ -99,6 +101,18 @@ export default function SessionSummary() {
       })
     : '—'
 
+  function startEditDate() {
+    setDateInput(session?.session_date ? session.session_date.slice(0, 10) : '')
+    setEditingDate(true)
+  }
+
+  async function saveDate() {
+    if (!id || !dateInput) return
+    await api.updateSessionDate(id, dateInput)
+    setSession((prev) => (prev ? { ...prev, session_date: dateInput } : prev))
+    setEditingDate(false)
+  }
+
   return (
     <div>
       <button onClick={() => navigate('/')} className="text-slate-400 hover:text-white text-sm mb-4">
@@ -108,7 +122,27 @@ export default function SessionSummary() {
       {session && (
         <div className="flex items-start justify-between mb-6">
           <div>
-            <h1 className="text-2xl font-bold text-white">{date}</h1>
+            {editingDate ? (
+              <div className="flex items-center gap-2">
+                <input
+                  autoFocus
+                  type="date"
+                  value={dateInput}
+                  onChange={(e) => setDateInput(e.target.value)}
+                  className="bg-slate-700 text-white rounded px-2 py-1 text-lg"
+                />
+                <button onClick={saveDate} className="text-green-400 text-sm">✓</button>
+                <button onClick={() => setEditingDate(false)} className="text-slate-400 text-sm">✕</button>
+              </div>
+            ) : (
+              <h1
+                onClick={startEditDate}
+                className="text-2xl font-bold text-white cursor-pointer hover:text-green-400 transition-colors"
+                title="Click to edit date"
+              >
+                {date}
+              </h1>
+            )}
             <p className="text-slate-400 text-sm mt-1">
               {session.session_type} · {shots.length} shots
             </p>

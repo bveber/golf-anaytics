@@ -13,7 +13,8 @@ import SessionClubs from './pages/SessionClubs'
 import Bag from './pages/Bag'
 import Login from './pages/Login'
 import { BagProvider } from './BagContext'
-import { AuthProvider, useAuth } from './AuthContext'
+import { AuthProvider } from './AuthContext'
+import { useAuth } from './hooks/useAuth'
 import SettingsModal from './components/SettingsModal'
 
 function Nav() {

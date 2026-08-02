@@ -58,6 +58,10 @@ class OutlierUpdate(BaseModel):
     outlier_note: Optional[str] = None
 
 
+class SessionDateUpdate(BaseModel):
+    session_date: datetime
+
+
 class UserSettings(BaseModel):
     elevation_ft:  float
     temperature_f: float
