@@ -22,7 +22,19 @@ def backup_db() -> Path:
     shutil.copy2(db_path, dest)
 
     _prune_old_db_backups(backup_dir, keep=30)
+    _upload_to_s3(dest)
     return dest
+
+
+def _upload_to_s3(path: Path) -> None:
+    bucket = os.environ.get("BACKUP_S3_BUCKET")
+    if not bucket:
+        return
+    import boto3
+
+    boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1")).upload_file(
+        str(path), bucket, f"db/{path.name}"
+    )
 
 
 def _prune_old_db_backups(backup_dir: Path, keep: int) -> None:
