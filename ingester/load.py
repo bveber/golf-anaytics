@@ -16,13 +16,14 @@ from db import get_connection
 _DB_PATH = Path(__file__).parent.parent / "db" / "golf_analytics.duckdb"
 
 
-def _apply_effort_thresholds(shot_ids: list[str]) -> None:
+def _apply_effort_thresholds(shot_ids: list[str], user_id: int) -> None:
     """Classify new shots using existing thresholds so they appear on the Clubs page."""
     if not shot_ids:
         return
     conn = get_connection()
     rows = conn.execute(
-        "SELECT club_type, bucket_index, upper_bound FROM swing_effort_thresholds ORDER BY club_type, bucket_index"
+        "SELECT club_type, bucket_index, upper_bound FROM swing_effort_thresholds WHERE user_id = ? ORDER BY club_type, bucket_index",
+        [user_id],
     ).fetchall()
     if not rows:
         return
@@ -51,7 +52,7 @@ def _apply_effort_thresholds(shot_ids: list[str]) -> None:
             conn.execute("UPDATE shots SET swing_effort = ? WHERE shot_id = ?", [effort, shot_id])
 
 
-def load_session(session: ParsedSession) -> int:
+def load_session(session: ParsedSession, user_id: int) -> int:
     """
     Insert the session and any new shots into the database.
     Returns the number of new shots inserted.
@@ -61,10 +62,10 @@ def load_session(session: ParsedSession) -> int:
     if not session_exists(session.session_id):
         conn.execute(
             """
-            INSERT INTO sessions (session_id, session_date, session_type, scraped_at)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO sessions (session_id, user_id, session_date, session_type, scraped_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            [session.session_id, session.session_date, session.session_type, session.scraped_at],
+            [session.session_id, user_id, session.session_date, session.session_type, session.scraped_at],
         )
 
     new_shots = filter_new_shots(session)
@@ -72,17 +73,17 @@ def load_session(session: ParsedSession) -> int:
         conn.executemany(
             """
             INSERT INTO shots (
-                shot_id, session_id, shot_number, club, club_type, target_distance,
+                shot_id, session_id, user_id, shot_number, club, club_type, target_distance,
                 ball_speed, launch_angle, launch_direction,
                 spin_rate, spin_axis, smash_factor,
                 carry_distance, total_distance, side_carry,
                 apex, descent_angle,
                 club_speed, attack_angle, club_path
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
-                    s.shot_id, s.session_id, s.shot_number, s.club, s.club_type,
+                    s.shot_id, s.session_id, user_id, s.shot_number, s.club, s.club_type,
                     s.target_distance,
                     s.ball_speed, s.launch_angle, s.launch_direction,
                     s.spin_rate, s.spin_axis, s.smash_factor,
@@ -96,11 +97,11 @@ def load_session(session: ParsedSession) -> int:
 
     if new_shots:
         impute_club_speeds()
-        _apply_effort_thresholds(shot_ids=[s.shot_id for s in new_shots])
+        _apply_effort_thresholds(shot_ids=[s.shot_id for s in new_shots], user_id=user_id)
         compute_stopping_power(shot_ids=[s.shot_id for s in new_shots])
         adj_conn = duckdb.connect(str(_DB_PATH))
         try:
-            recompute_adjustments(adj_conn)
+            recompute_adjustments(adj_conn, user_id)
         finally:
             adj_conn.close()
 

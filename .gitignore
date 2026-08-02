@@ -1,5 +1,6 @@
 .env
 .rcloud_cookies.json
+.cookies/
 db/golf_analytics.duckdb
 backups/
 __pycache__/
@@ -11,3 +12,12 @@ node_modules/
 tmp/
 
 logs/
+
+# Terraform
+terraform/.terraform/
+terraform/.build/
+terraform/*.tfstate
+terraform/*.tfstate.*
+terraform/tfplan
+terraform/*.tfplan
+terraform/crash.log

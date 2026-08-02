@@ -1,41 +1,47 @@
 import json
 import duckdb
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, UploadFile, File, HTTPException
+
+from api.auth import get_current_user_id
 from api.db import get_conn
 
 router = APIRouter(prefix="/golf-tracker", tags=["golf-tracker"])
 
 # ── Schema ─────────────────────────────────────────────────────────────────────
 
-DROP_ORDER = [
+TABLES_IN_DELETE_ORDER = [
     "gt_penalties", "gt_putts", "gt_shots",
     "gt_hole_stats", "gt_rounds", "gt_holes",
     "gt_tee_sets", "gt_courses",
 ]
 
 CREATE_SQL = """
-CREATE TABLE gt_courses (
-    id INTEGER PRIMARY KEY,
-    name VARCHAR, city VARCHAR, state VARCHAR, hole_count INTEGER
+CREATE TABLE IF NOT EXISTS gt_courses (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
+    name VARCHAR, city VARCHAR, state VARCHAR, hole_count INTEGER,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_tee_sets (
-    id INTEGER PRIMARY KEY,
-    course_id INTEGER, name VARCHAR, rating DOUBLE, slope INTEGER
+CREATE TABLE IF NOT EXISTS gt_tee_sets (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
+    course_id INTEGER, name VARCHAR, rating DOUBLE, slope INTEGER,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_holes (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gt_holes (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
     course_id INTEGER, hole_number INTEGER, par INTEGER,
     handicap_index INTEGER,
-    tee_lat DOUBLE, tee_lng DOUBLE, green_lat DOUBLE, green_lng DOUBLE
+    tee_lat DOUBLE, tee_lng DOUBLE, green_lat DOUBLE, green_lng DOUBLE,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_rounds (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gt_rounds (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
     course_id INTEGER, tee_set_id INTEGER,
     date VARCHAR, is_finalized BOOLEAN, is_practice BOOLEAN,
-    notes VARCHAR, start_hole INTEGER, total_holes INTEGER
+    notes VARCHAR, start_hole INTEGER, total_holes INTEGER,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_hole_stats (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gt_hole_stats (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
     round_id INTEGER, hole_id INTEGER,
     score INTEGER, score_manual BOOLEAN, is_scored BOOLEAN,
     putts INTEGER, chips INTEGER, sand_shots INTEGER,
@@ -49,10 +55,11 @@ CREATE TABLE gt_hole_stats (
     tee_dispersion_long INTEGER, tee_dispersion_short INTEGER,
     sg_approach DOUBLE, sg_around_green DOUBLE,
     sg_off_tee DOUBLE, sg_off_tee_expected DOUBLE,
-    sg_putting DOUBLE, strokes_gained DOUBLE, difficulty_adjustment DOUBLE
+    sg_putting DOUBLE, strokes_gained DOUBLE, difficulty_adjustment DOUBLE,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_shots (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gt_shots (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
     hole_stat_id INTEGER, shot_number INTEGER, club_id INTEGER,
     distance_to_pin INTEGER, distance_traveled INTEGER,
     lie VARCHAR, outcome VARCHAR,
@@ -61,18 +68,21 @@ CREATE TABLE gt_shots (
     start_lat DOUBLE, start_lng DOUBLE,
     target_lat DOUBLE, target_lng DOUBLE,
     dispersion_left INTEGER, dispersion_right INTEGER,
-    dispersion_long INTEGER, dispersion_short INTEGER
+    dispersion_long INTEGER, dispersion_short INTEGER,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_putts (
-    id INTEGER PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS gt_putts (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
     hole_stat_id INTEGER, putt_number INTEGER,
     distance DOUBLE, made BOOLEAN, strokes_gained DOUBLE,
     break_direction VARCHAR, direction_miss VARCHAR,
-    pace_miss VARCHAR, slope_direction VARCHAR
+    pace_miss VARCHAR, slope_direction VARCHAR,
+    PRIMARY KEY (user_id, id)
 );
-CREATE TABLE gt_penalties (
-    id INTEGER PRIMARY KEY,
-    hole_stat_id INTEGER, shot_number INTEGER, strokes INTEGER, type VARCHAR
+CREATE TABLE IF NOT EXISTS gt_penalties (
+    user_id INTEGER NOT NULL, id INTEGER NOT NULL,
+    hole_stat_id INTEGER, shot_number INTEGER, strokes INTEGER, type VARCHAR,
+    PRIMARY KEY (user_id, id)
 );
 """
 
@@ -87,7 +97,7 @@ def _g(d: dict, *keys, default=None):
     return d
 
 
-def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
+def _ingest(conn: duckdb.DuckDBPyConnection, data: list, user_id: int) -> dict:
     seen_courses: set = set()
     seen_tee_sets: set = set()
     seen_holes: set = set()
@@ -106,8 +116,8 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
         if cid and cid not in seen_courses:
             seen_courses.add(cid)
             conn.execute(
-                "INSERT INTO gt_courses VALUES (?,?,?,?,?)",
-                [cid, course.get("name"), course.get("city"),
+                "INSERT INTO gt_courses VALUES (?,?,?,?,?,?)",
+                [user_id, cid, course.get("name"), course.get("city"),
                  course.get("state"), course.get("holeCount")],
             )
 
@@ -116,16 +126,16 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
         if tsid and tsid not in seen_tee_sets:
             seen_tee_sets.add(tsid)
             conn.execute(
-                "INSERT INTO gt_tee_sets VALUES (?,?,?,?,?)",
-                [tsid, tee_set.get("courseId"), tee_set.get("name"),
+                "INSERT INTO gt_tee_sets VALUES (?,?,?,?,?,?)",
+                [user_id, tsid, tee_set.get("courseId"), tee_set.get("name"),
                  tee_set.get("rating"), tee_set.get("slope")],
             )
 
         # ── Round ──
         rid = rnd.get("id")
         conn.execute(
-            "INSERT INTO gt_rounds VALUES (?,?,?,?,?,?,?,?,?)",
-            [rid, rnd.get("courseId"), rnd.get("teeSetId"),
+            "INSERT INTO gt_rounds VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [user_id, rid, rnd.get("courseId"), rnd.get("teeSetId"),
              rnd.get("date"), rnd.get("isFinalized"), rnd.get("isPractice"),
              rnd.get("notes", ""), rnd.get("startHole"), rnd.get("totalHoles")],
         )
@@ -140,8 +150,8 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
             if hid and hid not in seen_holes:
                 seen_holes.add(hid)
                 conn.execute(
-                    "INSERT INTO gt_holes VALUES (?,?,?,?,?,?,?,?,?)",
-                    [hid, hole.get("courseId"), hole.get("holeNumber"),
+                    "INSERT INTO gt_holes VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    [user_id, hid, hole.get("courseId"), hole.get("holeNumber"),
                      hole.get("par"), hole.get("handicapIndex"),
                      hole.get("teeLat"), hole.get("teeLng"),
                      hole.get("greenLat"), hole.get("greenLng")],
@@ -150,9 +160,9 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
             hsid = hs.get("id")
             conn.execute(
                 """INSERT INTO gt_hole_stats VALUES
-                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 [
-                    hsid, rid, hid,
+                    user_id, hsid, rid, hid,
                     hs.get("score"), hs.get("scoreManual"), hs.get("isScored"),
                     hs.get("putts"), hs.get("chips"), hs.get("sandShots"),
                     hs.get("gir"), hs.get("nearGir"), hs.get("girOverride"),
@@ -175,9 +185,9 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
             for shot in hs_entry.get("shots", []):
                 conn.execute(
                     """INSERT INTO gt_shots VALUES
-                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     [
-                        shot.get("id"), hsid, shot.get("shotNumber"),
+                        user_id, shot.get("id"), hsid, shot.get("shotNumber"),
                         shot.get("clubId"),
                         shot.get("distanceToPin"), shot.get("distanceTraveled"),
                         shot.get("lie"), shot.get("outcome"),
@@ -194,9 +204,9 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
             # Putts
             for putt in hs_entry.get("putts", []):
                 conn.execute(
-                    "INSERT INTO gt_putts VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO gt_putts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                     [
-                        putt.get("id"), hsid, putt.get("puttNumber"),
+                        user_id, putt.get("id"), hsid, putt.get("puttNumber"),
                         putt.get("distance"), putt.get("made"),
                         putt.get("strokesGained"),
                         putt.get("breakDirection"), putt.get("directionMiss"),
@@ -208,8 +218,8 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
             # Penalties
             for pen in hs_entry.get("penalties", []):
                 conn.execute(
-                    "INSERT INTO gt_penalties VALUES (?,?,?,?,?)",
-                    [pen.get("id"), hsid, pen.get("shotNumber"),
+                    "INSERT INTO gt_penalties VALUES (?,?,?,?,?,?)",
+                    [user_id, pen.get("id"), hsid, pen.get("shotNumber"),
                      pen.get("strokes"), pen.get("type")],
                 )
 
@@ -224,7 +234,7 @@ def _ingest(conn: duckdb.DuckDBPyConnection, data: list) -> dict:
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 @router.post("/ingest")
-async def ingest(file: UploadFile = File(...)):
+async def ingest(file: UploadFile = File(...), user_id: int = Depends(get_current_user_id)):
     if not file.filename.endswith(".json"):
         raise HTTPException(400, "Expected a .json file")
 
@@ -239,13 +249,13 @@ async def ingest(file: UploadFile = File(...)):
 
     conn = get_conn()
     try:
-        for table in DROP_ORDER:
-            conn.execute(f"DROP TABLE IF EXISTS {table}")
         for stmt in CREATE_SQL.strip().split(";"):
             stmt = stmt.strip()
             if stmt:
                 conn.execute(stmt)
-        counts = _ingest(conn, data)
+        for table in TABLES_IN_DELETE_ORDER:
+            conn.execute(f"DELETE FROM {table} WHERE user_id = ?", [user_id])
+        counts = _ingest(conn, data, user_id)
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -253,7 +263,7 @@ async def ingest(file: UploadFile = File(...)):
 
 
 @router.get("/rounds")
-def list_rounds():
+def list_rounds(user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
     tables = {r[0] for r in conn.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_name LIKE 'gt_%'"
@@ -275,14 +285,15 @@ def list_rounds():
             SUM(hs.sg_putting) AS sg_putting,
             SUM(hs.strokes_gained) AS strokes_gained
         FROM gt_rounds r
-        JOIN gt_courses c ON c.id = r.course_id
-        JOIN gt_tee_sets ts ON ts.id = r.tee_set_id
-        JOIN gt_hole_stats hs ON hs.round_id = r.id
-        JOIN gt_holes h ON h.id = hs.hole_id
+        JOIN gt_courses c ON c.id = r.course_id AND c.user_id = r.user_id
+        JOIN gt_tee_sets ts ON ts.id = r.tee_set_id AND ts.user_id = r.user_id
+        JOIN gt_hole_stats hs ON hs.round_id = r.id AND hs.user_id = r.user_id
+        JOIN gt_holes h ON h.id = hs.hole_id AND h.user_id = hs.user_id
+        WHERE r.user_id = ?
         GROUP BY r.id, r.date, r.is_practice, r.total_holes, r.notes,
                  c.name, c.city, c.state, ts.name, ts.rating, ts.slope
         ORDER BY r.date DESC
-    """).fetchall()
+    """, [user_id]).fetchall()
 
     cols = [
         "id", "date", "is_practice", "total_holes", "notes",
@@ -305,7 +316,7 @@ def list_rounds():
 
 
 @router.get("/rounds/{round_id}")
-def get_round(round_id: int):
+def get_round(round_id: int, user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
 
     rnd = conn.execute("""
@@ -313,10 +324,10 @@ def get_round(round_id: int):
                c.name, c.city, c.state,
                ts.name, ts.rating, ts.slope
         FROM gt_rounds r
-        JOIN gt_courses c ON c.id = r.course_id
-        JOIN gt_tee_sets ts ON ts.id = r.tee_set_id
-        WHERE r.id = ?
-    """, [round_id]).fetchone()
+        JOIN gt_courses c ON c.id = r.course_id AND c.user_id = r.user_id
+        JOIN gt_tee_sets ts ON ts.id = r.tee_set_id AND ts.user_id = r.user_id
+        WHERE r.id = ? AND r.user_id = ?
+    """, [round_id, user_id]).fetchone()
 
     if not rnd:
         raise HTTPException(404, "Round not found")
@@ -337,12 +348,12 @@ def get_round(round_id: int):
             hs.tee_dispersion_left, hs.tee_dispersion_right,
             hs.tee_dispersion_long, hs.tee_dispersion_short,
             hs.sg_off_tee, hs.sg_approach, hs.sg_around_green, hs.sg_putting, hs.strokes_gained,
-            (SELECT COUNT(*) FROM gt_penalties p WHERE p.hole_stat_id = hs.id) AS penalties
+            (SELECT COUNT(*) FROM gt_penalties p WHERE p.hole_stat_id = hs.id AND p.user_id = hs.user_id) AS penalties
         FROM gt_hole_stats hs
-        JOIN gt_holes h ON h.id = hs.hole_id
-        WHERE hs.round_id = ?
+        JOIN gt_holes h ON h.id = hs.hole_id AND h.user_id = hs.user_id
+        WHERE hs.round_id = ? AND hs.user_id = ?
         ORDER BY h.hole_number
-    """, [round_id]).fetchall()
+    """, [round_id, user_id]).fetchall()
 
     hole_cols = [
         "hole_number", "par", "handicap_index",
@@ -367,12 +378,12 @@ def get_round(round_id: int):
 
 
 @router.get("/shots")
-def get_all_shots(club_id: int | None = None):
+def get_all_shots(club_id: int | None = None, user_id: int = Depends(get_current_user_id)):
     """All on-course shots (approach + tee), optionally filtered by club_id, with dispersion data."""
     conn = get_conn()
-    where_approach = "WHERE s.club_id = ?" if club_id is not None else ""
-    where_tee = "WHERE hs.tee_club_id = ?" if club_id is not None else ""
-    params = [club_id] if club_id is not None else []
+    params = [user_id]
+    if club_id is not None:
+        params.append(club_id)
     rows = conn.execute(f"""
         SELECT
             s.club_id, s.distance_to_pin, s.distance_traveled,
@@ -383,11 +394,11 @@ def get_all_shots(club_id: int | None = None):
             r.date AS round_date, c.name AS course_name,
             h.hole_number
         FROM gt_shots s
-        JOIN gt_hole_stats hs ON hs.id = s.hole_stat_id
-        JOIN gt_rounds r ON r.id = hs.round_id
-        JOIN gt_courses c ON c.id = r.course_id
-        JOIN gt_holes h ON h.id = hs.hole_id
-        WHERE s.is_recovery = false
+        JOIN gt_hole_stats hs ON hs.id = s.hole_stat_id AND hs.user_id = s.user_id
+        JOIN gt_rounds r ON r.id = hs.round_id AND r.user_id = hs.user_id
+        JOIN gt_courses c ON c.id = r.course_id AND c.user_id = r.user_id
+        JOIN gt_holes h ON h.id = hs.hole_id AND h.user_id = hs.user_id
+        WHERE s.user_id = ? AND s.is_recovery = false
         {'AND s.club_id = ?' if club_id is not None else ''}
         UNION ALL
         SELECT
@@ -405,10 +416,10 @@ def get_all_shots(club_id: int | None = None):
             r.date AS round_date, c.name AS course_name,
             h.hole_number
         FROM gt_hole_stats hs
-        JOIN gt_rounds r ON r.id = hs.round_id
-        JOIN gt_courses c ON c.id = r.course_id
-        JOIN gt_holes h ON h.id = hs.hole_id
-        WHERE hs.tee_club_id IS NOT NULL
+        JOIN gt_rounds r ON r.id = hs.round_id AND r.user_id = hs.user_id
+        JOIN gt_courses c ON c.id = r.course_id AND c.user_id = r.user_id
+        JOIN gt_holes h ON h.id = hs.hole_id AND h.user_id = hs.user_id
+        WHERE hs.user_id = ? AND hs.tee_club_id IS NOT NULL
           AND (hs.tee_dispersion_left IS NOT NULL OR hs.tee_dispersion_right IS NOT NULL
                OR hs.tee_dispersion_long IS NOT NULL OR hs.tee_dispersion_short IS NOT NULL)
           {'AND hs.tee_club_id = ?' if club_id is not None else ''}
@@ -426,7 +437,7 @@ def get_all_shots(club_id: int | None = None):
 
 
 @router.get("/rounds/{round_id}/shots")
-def get_round_shots(round_id: int):
+def get_round_shots(round_id: int, user_id: int = Depends(get_current_user_id)):
     """Approach shots for a round — used for comparison with launch monitor."""
     conn = get_conn()
     rows = conn.execute("""
@@ -437,11 +448,11 @@ def get_round_shots(round_id: int):
             s.strokes_gained, s.dispersion_left, s.dispersion_right,
             s.dispersion_long, s.dispersion_short
         FROM gt_shots s
-        JOIN gt_hole_stats hs ON hs.id = s.hole_stat_id
-        JOIN gt_holes h ON h.id = hs.hole_id
-        WHERE hs.round_id = ?
+        JOIN gt_hole_stats hs ON hs.id = s.hole_stat_id AND hs.user_id = s.user_id
+        JOIN gt_holes h ON h.id = hs.hole_id AND h.user_id = hs.user_id
+        WHERE hs.round_id = ? AND hs.user_id = ?
         ORDER BY h.hole_number, s.shot_number
-    """, [round_id]).fetchall()
+    """, [round_id, user_id]).fetchall()
     cols = [
         "hole_number", "shot_number", "club_id",
         "distance_to_pin", "distance_traveled",

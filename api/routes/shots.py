@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.auth import get_current_user_id
 from api.db import get_conn
 from api.models import CorrectedShot, OutlierUpdate, Shot
 
@@ -22,11 +23,13 @@ SHOT_COLS = [
 
 
 @router.get("/session/{session_id}", response_model=list[CorrectedShot])
-def get_shots_for_session(session_id: str) -> list[CorrectedShot]:
+def get_shots_for_session(
+    session_id: str, user_id: int = Depends(get_current_user_id)
+) -> list[CorrectedShot]:
     conn = get_conn()
     rows = conn.execute(
-        f"SELECT {', '.join(SHOT_COLS)} FROM shots WHERE session_id = ? ORDER BY shot_number",
-        [session_id],
+        f"SELECT {', '.join(SHOT_COLS)} FROM shots WHERE session_id = ? AND user_id = ? ORDER BY shot_number",
+        [session_id, user_id],
     ).fetchall()
     return [CorrectedShot(**dict(zip(SHOT_COLS, r))) for r in rows]
 
@@ -41,10 +44,11 @@ def get_shots_by_club(
     disabled_clubs: Optional[str] = None,
     limit_sessions: Optional[int] = None,
     club: Optional[str] = None,
+    user_id: int = Depends(get_current_user_id),
 ) -> list[CorrectedShot]:
     conn = get_conn()
-    conditions = ["sh.club_type = ?"]
-    params: list = [club_type]
+    conditions = ["sh.club_type = ?", "sh.user_id = ?"]
+    params: list = [club_type, user_id]
 
     if not include_outliers:
         conditions.append("sh.is_outlier = false")
@@ -69,7 +73,11 @@ def get_shots_by_club(
             conditions.append(f"(sh.club_type || '|' || sh.club) NOT IN ({placeholders})")
             params.extend(pairs)
     if limit_sessions:
-        conditions.append(f"sh.session_id IN (SELECT session_id FROM sessions ORDER BY session_date DESC LIMIT {limit_sessions})")
+        conditions.append(
+            "sh.session_id IN (SELECT session_id FROM sessions WHERE user_id = ? "
+            f"ORDER BY session_date DESC LIMIT {limit_sessions})"
+        )
+        params.append(user_id)
 
     where = " AND ".join(conditions)
     club_cols = [f"sh.{c}" for c in SHOT_COLS] + ["CAST(s.session_date AS VARCHAR) AS session_date"]
@@ -89,9 +97,11 @@ def get_shots_by_club(
 
 
 @router.patch("/{shot_id}/outlier")
-def update_outlier(shot_id: str, body: OutlierUpdate):
+def update_outlier(shot_id: str, body: OutlierUpdate, user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
-    exists = conn.execute("SELECT 1 FROM shots WHERE shot_id = ?", [shot_id]).fetchone()
+    exists = conn.execute(
+        "SELECT 1 FROM shots WHERE shot_id = ? AND user_id = ?", [shot_id, user_id]
+    ).fetchone()
     if not exists:
         raise HTTPException(status_code=404, detail="Shot not found")
     conn.execute(
