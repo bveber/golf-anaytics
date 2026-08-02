@@ -247,11 +247,31 @@ data "aws_iam_policy_document" "github_actions_policy" {
       "logs:*",
       "iam:GetRole", "iam:PassRole", "iam:GetInstanceProfile",
       "iam:CreateRole", "iam:DeleteRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-      "iam:GetRolePolicy", "iam:GetOpenIDConnectProvider", "iam:TagRole",
+      "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:GetOpenIDConnectProvider", "iam:TagRole",
       "iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy", "iam:ListPolicyVersions",
       "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListAttachedRolePolicies",
     ]
     resources = ["*"]
+  }
+
+  # DescribeParameters doesn't support resource-level scoping, so this can't
+  # be narrowed to the origin-cert/origin-key params like the statement above.
+  statement {
+    sid       = "SSMParameterRefresh"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid    = "BackupsBucketConfigRefresh"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucketVersioning",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetBucketPublicAccessBlock",
+    ]
+    resources = [aws_s3_bucket.backups.arn]
   }
 }
 
