@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from api.auth import get_current_user_id
 from api.db import get_conn
 from api.models import ClubStats
 
@@ -20,10 +21,11 @@ def club_stats(
     session_id: Optional[str] = None,
     disabled_clubs: Optional[str] = None,
     limit_sessions: Optional[int] = None,
+    user_id: int = Depends(get_current_user_id),
 ):
     conn = get_conn()
-    conditions = ["sh.club_type IS NOT NULL", "sh.club IS NOT NULL"]
-    params: list = []
+    conditions = ["sh.club_type IS NOT NULL", "sh.club IS NOT NULL", "sh.user_id = ?"]
+    params: list = [user_id]
 
     if not include_outliers:
         conditions.append("sh.is_outlier = false")
@@ -55,7 +57,11 @@ def club_stats(
             conditions.append(f"(sh.club_type || '|' || sh.club) NOT IN ({placeholders})")
             params.extend(pairs)
     if limit_sessions:
-        conditions.append(f"sh.session_id IN (SELECT session_id FROM sessions ORDER BY session_date DESC LIMIT {limit_sessions})")
+        conditions.append(
+            "sh.session_id IN (SELECT session_id FROM sessions WHERE user_id = ? "
+            f"ORDER BY session_date DESC LIMIT {limit_sessions})"
+        )
+        params.append(user_id)
 
     where = " AND ".join(conditions)
     # IQR_THRESHOLD: clubs with fewer shots skip IQR filtering (not enough data).
@@ -214,6 +220,7 @@ def club_trend(
     date_to: Optional[str] = None,
     disabled_clubs: Optional[str] = None,
     club: Optional[str] = None,
+    user_id: int = Depends(get_current_user_id),
 ):
     allowed = {
         "carry_distance", "total_distance", "ball_speed", "launch_angle",
@@ -225,8 +232,8 @@ def club_trend(
         raise HTTPException(400, f"metric must be one of {sorted(allowed)}")
 
     conn = get_conn()
-    conditions = ["sh.club_type = ?"]
-    params: list = [club_type]
+    conditions = ["sh.club_type = ?", "sh.user_id = ?"]
+    params: list = [club_type, user_id]
 
     if not include_outliers:
         conditions.append("sh.is_outlier = false")
@@ -277,10 +284,11 @@ def club_trend(
 
 
 @router.get("/clubs/list")
-def list_clubs():
+def list_clubs(user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
     rows = conn.execute(
-        "SELECT DISTINCT club, club_type FROM shots WHERE club IS NOT NULL ORDER BY club"
+        "SELECT DISTINCT club, club_type FROM shots WHERE club IS NOT NULL AND user_id = ? ORDER BY club",
+        [user_id],
     ).fetchall()
 
     return [{"club": r[0], "club_type": r[1]} for r in rows]

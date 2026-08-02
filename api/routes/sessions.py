@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional
+from api.auth import get_current_user_id
 from api.db import get_conn
 from api.models import Session
 
@@ -7,10 +8,14 @@ router = APIRouter(prefix="/sessions", tags=["sessions"])
 
 
 @router.get("/", response_model=list[Session])
-def list_sessions(session_type: Optional[str] = None):
+def list_sessions(session_type: Optional[str] = None, user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
-    where = "WHERE s.session_type = ?" if session_type else ""
-    params = [session_type] if session_type else []
+    conditions = ["s.user_id = ?"]
+    params: list = [user_id]
+    if session_type:
+        conditions.append("s.session_type = ?")
+        params.append(session_type)
+    where = "WHERE " + " AND ".join(conditions)
     rows = conn.execute(
         f"""
         SELECT s.session_id, s.session_date, s.session_type, s.notes, s.scraped_at,
@@ -29,7 +34,7 @@ def list_sessions(session_type: Optional[str] = None):
 
 
 @router.get("/{session_id}", response_model=Session)
-def get_session(session_id: str):
+def get_session(session_id: str, user_id: int = Depends(get_current_user_id)):
     conn = get_conn()
     row = conn.execute(
         """
@@ -37,10 +42,10 @@ def get_session(session_id: str):
                COUNT(sh.shot_id) AS shot_count
         FROM sessions s
         LEFT JOIN shots sh ON sh.session_id = s.session_id
-        WHERE s.session_id = ?
+        WHERE s.session_id = ? AND s.user_id = ?
         GROUP BY s.session_id, s.session_date, s.session_type, s.notes, s.scraped_at
         """,
-        [session_id],
+        [session_id, user_id],
     ).fetchone()
 
     if not row:

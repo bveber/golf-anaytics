@@ -1,5 +1,16 @@
+CREATE SEQUENCE IF NOT EXISTS users_id_seq START 1;
+
+CREATE TABLE IF NOT EXISTS users (
+    user_id      INTEGER PRIMARY KEY DEFAULT nextval('users_id_seq'),
+    google_sub   TEXT UNIQUE NOT NULL,
+    email        TEXT NOT NULL,
+    display_name TEXT,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS sessions (
     session_id    TEXT PRIMARY KEY,
+    user_id       INTEGER NOT NULL REFERENCES users(user_id),
     session_date  TIMESTAMPTZ,
     session_type  TEXT,   -- practice, combines, range, target, closesttopin, speed
     notes         TEXT,
@@ -9,6 +20,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS shots (
     shot_id       TEXT PRIMARY KEY,  -- '{session_id}:{shot_number}'
     session_id    TEXT NOT NULL REFERENCES sessions(session_id),
+    user_id       INTEGER NOT NULL REFERENCES users(user_id),
     shot_number   INTEGER NOT NULL,
     club          TEXT,        -- "{Brand} {Model}" e.g. "TaylorMade SIM 2 MAX"
     club_type     TEXT,        -- abbreviated type from CSV: d, sw, i, w, etc.
@@ -39,29 +51,44 @@ CREATE TABLE IF NOT EXISTS shots (
 );
 
 CREATE TABLE IF NOT EXISTS swing_effort_thresholds (
+    user_id      INTEGER NOT NULL REFERENCES users(user_id),
     club_type    TEXT NOT NULL,
     bucket_index INTEGER NOT NULL,
     lower_bound  DOUBLE NOT NULL,
     upper_bound  DOUBLE,
     label        TEXT NOT NULL,
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (club_type, bucket_index)
+    PRIMARY KEY (user_id, club_type, bucket_index)
 );
 
 CREATE TABLE IF NOT EXISTS user_settings (
-    id            INTEGER PRIMARY KEY DEFAULT 1,
+    user_id       INTEGER PRIMARY KEY REFERENCES users(user_id),
     elevation_ft  DOUBLE NOT NULL DEFAULT 900.0,
     temperature_f DOUBLE NOT NULL DEFAULT 70.0
 );
-INSERT OR IGNORE INTO user_settings (id) VALUES (1);
 
 CREATE TABLE IF NOT EXISTS combine_sessions (
     combine_id        TEXT PRIMARY KEY,
     session_id        TEXT NOT NULL REFERENCES sessions(session_id),
+    user_id           INTEGER NOT NULL REFERENCES users(user_id),
     target_1_distance DOUBLE,
     target_1_club     TEXT,
     target_2_distance DOUBLE,
     target_2_club     TEXT,
     target_3_club     TEXT DEFAULT 'Driver',
     rapsodo_score     DOUBLE
+);
+
+CREATE SEQUENCE IF NOT EXISTS sync_jobs_id_seq START 1;
+
+CREATE TABLE IF NOT EXISTS sync_jobs (
+    job_id      INTEGER PRIMARY KEY DEFAULT nextval('sync_jobs_id_seq'),
+    user_id     INTEGER NOT NULL REFERENCES users(user_id),
+    status      TEXT NOT NULL DEFAULT 'queued',  -- queued, running, success, failed
+    trigger     TEXT NOT NULL,                    -- manual, scheduled
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    started_at  TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ,
+    result      TEXT,
+    error       TEXT
 );

@@ -1,0 +1,71 @@
+name: Deploy app
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::631232331576:role/golf-analytics-github-actions
+          aws-region: us-east-1
+
+      - name: Ensure instance is running
+        id: instance
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=golf-analytics-app" "Name=instance-state-name,Values=running,stopped,stopping,pending" \
+            --query "Reservations[0].Instances[0].InstanceId" --output text)
+          echo "instance_id=$INSTANCE_ID" >> "$GITHUB_OUTPUT"
+
+          STATE=$(aws ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+            --query "Reservations[0].Instances[0].State.Name" --output text)
+          echo "Instance $INSTANCE_ID is $STATE"
+
+          if [ "$STATE" = "stopped" ]; then
+            aws ec2 start-instances --instance-ids "$INSTANCE_ID"
+          fi
+
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+          aws ec2 wait instance-status-ok --instance-ids "$INSTANCE_ID"
+
+      - name: Deploy via SSM
+        run: |
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["/opt/golf-analytics/scripts/deploy.sh"]' \
+            --query "Command.CommandId" --output text)
+
+          echo "Waiting for deploy command $CMD_ID..."
+          for i in $(seq 1 60); do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ steps.instance.outputs.instance_id }}" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            if [ "$STATUS" != "Pending" ] && [ "$STATUS" != "InProgress" ]; then
+              break
+            fi
+            sleep 5
+          done
+
+          aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" \
+            --query "StandardOutputContent" --output text
+
+          if [ "$STATUS" != "Success" ]; then
+            echo "Deploy failed with status: $STATUS" >&2
+            aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "${{ steps.instance.outputs.instance_id }}" \
+              --query "StandardErrorContent" --output text >&2
+            exit 1
+          fi

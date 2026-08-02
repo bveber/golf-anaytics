@@ -4,8 +4,9 @@ from collections import defaultdict
 from typing import Optional
 
 import jenkspy
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from api.auth import get_current_user_id
 from api.corrections import _carry_mult, _pct_club
 
 router = APIRouter(prefix="/swing-effort", tags=["swing-effort"])
@@ -69,44 +70,13 @@ def _make_label(rank: int, total: int, lo: float, hi: Optional[float]) -> str:
     return f"E{rank} ({speed_range})"
 
 
-# ── Schema migration ──────────────────────────────────────────────────────────
-
-def _ensure_schema(conn) -> bool:
-    """Create new narrow-schema thresholds table, migrating from old wide schema if present.
-    Returns True if old data was wiped (caller should remind user to recalibrate)."""
-    wiped = False
-    try:
-        old_cols = {r[0] for r in conn.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'swing_effort_thresholds'"
-        ).fetchall()}
-        if "full_speed" in old_cols:
-            conn.execute("DROP TABLE swing_effort_thresholds")
-            conn.execute("UPDATE shots SET swing_effort = NULL")
-            wiped = True
-    except Exception:
-        pass
-
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS swing_effort_thresholds (
-            club_type    TEXT NOT NULL,
-            bucket_index INTEGER NOT NULL,
-            lower_bound  DOUBLE NOT NULL,
-            upper_bound  DOUBLE,
-            label        TEXT NOT NULL,
-            updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-            PRIMARY KEY (club_type, bucket_index)
-        )
-    """)
-    conn.execute("ALTER TABLE shots ADD COLUMN IF NOT EXISTS swing_effort TEXT")
-    return wiped
-
-
 # ── Calibration ───────────────────────────────────────────────────────────────
 
-def _calibrate_club(conn, club_type_val: str) -> dict:
+def _calibrate_club(conn, club_type_val: str, user_id: int) -> dict:
     speeds = [r[0] for r in conn.execute(
-        "SELECT club_speed FROM shots WHERE club_type = ? AND club_speed IS NOT NULL AND is_outlier = false ORDER BY club_speed",
-        [club_type_val],
+        "SELECT club_speed FROM shots WHERE club_type = ? AND user_id = ? "
+        "AND club_speed IS NOT NULL AND is_outlier = false ORDER BY club_speed",
+        [club_type_val, user_id],
     ).fetchall()]
     n = len(speeds)
     if n < MIN_SHOTS:
@@ -115,26 +85,29 @@ def _calibrate_club(conn, club_type_val: str) -> dict:
     breaks = _best_breaks(speeds)
     k = len(breaks) - 1
 
-    conn.execute("DELETE FROM swing_effort_thresholds WHERE club_type = ?", [club_type_val])
+    conn.execute(
+        "DELETE FROM swing_effort_thresholds WHERE club_type = ? AND user_id = ?",
+        [club_type_val, user_id],
+    )
     for i in range(1, k + 1):
         lo = breaks[i - 1]
         hi = breaks[i] if i < k else None
         rank = k - i + 1  # rank 1 = highest speed = full effort
         label = _make_label(rank, k, lo, hi)
         conn.execute(
-            "INSERT INTO swing_effort_thresholds (club_type, bucket_index, lower_bound, upper_bound, label, updated_at) VALUES (?, ?, ?, ?, ?, now())",
-            [club_type_val, i, lo, hi, label],
+            "INSERT INTO swing_effort_thresholds (user_id, club_type, bucket_index, lower_bound, upper_bound, label, updated_at) VALUES (?, ?, ?, ?, ?, ?, now())",
+            [user_id, club_type_val, i, lo, hi, label],
         )
 
     shots = conn.execute(
-        "SELECT shot_id, club_speed FROM shots WHERE club_type = ? AND club_speed IS NOT NULL",
-        [club_type_val],
+        "SELECT shot_id, club_speed FROM shots WHERE club_type = ? AND user_id = ? AND club_speed IS NOT NULL",
+        [club_type_val, user_id],
     ).fetchall()
     for shot_id, cs in shots:
         conn.execute("UPDATE shots SET swing_effort = ? WHERE shot_id = ?", [_classify(cs, breaks), shot_id])
     conn.execute(
-        "UPDATE shots SET swing_effort = 'unknown' WHERE club_type = ? AND club_speed IS NULL",
-        [club_type_val],
+        "UPDATE shots SET swing_effort = 'unknown' WHERE club_type = ? AND user_id = ? AND club_speed IS NULL",
+        [club_type_val, user_id],
     )
 
     return {
@@ -147,34 +120,34 @@ def _calibrate_club(conn, club_type_val: str) -> dict:
 
 
 @router.post("/calibrate")
-def calibrate(club_type: Optional[str] = None):
+def calibrate(club_type: Optional[str] = None, user_id: int = Depends(get_current_user_id)):
     """Recompute Jenks breaks for all club types (or one) and reclassify shots."""
     from api.db import get_conn
     conn = get_conn()
-    _ensure_schema(conn)
 
     if club_type:
         eligible = [club_type]
     else:
         eligible = [r[0] for r in conn.execute(
-            f"SELECT club_type FROM shots WHERE club_type IS NOT NULL AND club_speed IS NOT NULL AND is_outlier = false GROUP BY club_type HAVING COUNT(*) >= {MIN_SHOTS}"
+            f"SELECT club_type FROM shots WHERE user_id = ? AND club_type IS NOT NULL AND club_speed IS NOT NULL AND is_outlier = false GROUP BY club_type HAVING COUNT(*) >= {MIN_SHOTS}",
+            [user_id],
         ).fetchall()]
 
-    updated = [r for ct in eligible if (r := _calibrate_club(conn, ct))]
+    updated = [r for ct in eligible if (r := _calibrate_club(conn, ct, user_id))]
     return {"calibrated": updated}
 
 
 # ── Manual threshold override ─────────────────────────────────────────────────
 
 @router.patch("/thresholds/{club_type}")
-def update_thresholds(club_type: str, body: dict):
+def update_thresholds(club_type: str, body: dict, user_id: int = Depends(get_current_user_id)):
     """Override bucket boundaries. body: {"boundaries": [b1, b2, ...]} — internal break points (excludes min/max)."""
     from api.db import get_conn
     conn = get_conn()
 
     row = conn.execute(
-        "SELECT MIN(club_speed), MAX(club_speed) FROM shots WHERE club_type = ? AND club_speed IS NOT NULL AND is_outlier = false",
-        [club_type],
+        "SELECT MIN(club_speed), MAX(club_speed) FROM shots WHERE club_type = ? AND user_id = ? AND club_speed IS NOT NULL AND is_outlier = false",
+        [club_type, user_id],
     ).fetchone()
     if not row or row[0] is None:
         raise HTTPException(404, f"No speed data for {club_type}")
@@ -188,19 +161,21 @@ def update_thresholds(club_type: str, body: dict):
             raise HTTPException(400, "Boundaries must be strictly increasing within the data range")
 
     k = len(breaks) - 1
-    conn.execute("DELETE FROM swing_effort_thresholds WHERE club_type = ?", [club_type])
+    conn.execute(
+        "DELETE FROM swing_effort_thresholds WHERE club_type = ? AND user_id = ?", [club_type, user_id]
+    )
     for i in range(1, k + 1):
         lo = breaks[i - 1]
         hi = breaks[i] if i < k else None
         rank = k - i + 1
         conn.execute(
-            "INSERT INTO swing_effort_thresholds (club_type, bucket_index, lower_bound, upper_bound, label, updated_at) VALUES (?, ?, ?, ?, ?, now())",
-            [club_type, i, lo, hi, _make_label(rank, k, lo, hi)],
+            "INSERT INTO swing_effort_thresholds (user_id, club_type, bucket_index, lower_bound, upper_bound, label, updated_at) VALUES (?, ?, ?, ?, ?, ?, now())",
+            [user_id, club_type, i, lo, hi, _make_label(rank, k, lo, hi)],
         )
 
     shots = conn.execute(
-        "SELECT shot_id, club_speed FROM shots WHERE club_type = ? AND club_speed IS NOT NULL",
-        [club_type],
+        "SELECT shot_id, club_speed FROM shots WHERE club_type = ? AND user_id = ? AND club_speed IS NOT NULL",
+        [club_type, user_id],
     ).fetchall()
     for shot_id, cs in shots:
         conn.execute("UPDATE shots SET swing_effort = ? WHERE shot_id = ?", [_classify(cs, breaks), shot_id])
@@ -211,19 +186,20 @@ def update_thresholds(club_type: str, body: dict):
 # ── Read endpoints ────────────────────────────────────────────────────────────
 
 @router.get("/thresholds")
-def get_thresholds(disabled_clubs: Optional[str] = None):
+def get_thresholds(disabled_clubs: Optional[str] = None, user_id: int = Depends(get_current_user_id)):
     """Return current thresholds for all club types grouped by club_type."""
     from api.db import get_conn
     conn = get_conn()
     try:
         rows = conn.execute(
-            "SELECT club_type, bucket_index, lower_bound, upper_bound, label, updated_at FROM swing_effort_thresholds ORDER BY club_type, bucket_index"
+            "SELECT club_type, bucket_index, lower_bound, upper_bound, label, updated_at FROM swing_effort_thresholds WHERE user_id = ? ORDER BY club_type, bucket_index",
+            [user_id],
         ).fetchall()
     except Exception:
         return []
 
-    shot_conditions = ["is_outlier = false", "club_type IS NOT NULL"]
-    shot_params: list = []
+    shot_conditions = ["is_outlier = false", "club_type IS NOT NULL", "user_id = ?"]
+    shot_params: list = [user_id]
     if disabled_clubs:
         pairs = [c.strip() for c in disabled_clubs.split(",") if c.strip() and "|" in c]
         if pairs:
@@ -253,13 +229,13 @@ def get_thresholds(disabled_clubs: Optional[str] = None):
 
 
 @router.get("/histogram/{club_type}")
-def speed_histogram(club_type: str, disabled_clubs: Optional[str] = None):
+def speed_histogram(club_type: str, disabled_clubs: Optional[str] = None, user_id: int = Depends(get_current_user_id)):
     """Return club_speed histogram data for a club type using 2 mph bins."""
     from api.db import get_conn
     conn = get_conn()
 
-    conditions = ["club_type = ?", "club_speed IS NOT NULL", "is_outlier = false"]
-    params: list = [club_type]
+    conditions = ["club_type = ?", "user_id = ?", "club_speed IS NOT NULL", "is_outlier = false"]
+    params: list = [club_type, user_id]
     if disabled_clubs:
         pairs = [c.strip() for c in disabled_clubs.split(",") if c.strip() and "|" in c]
         if pairs:
@@ -307,8 +283,8 @@ def speed_histogram(club_type: str, disabled_clubs: Optional[str] = None):
 
     try:
         threshold_rows = conn.execute(
-            "SELECT bucket_index, lower_bound, upper_bound, label FROM swing_effort_thresholds WHERE club_type = ? ORDER BY bucket_index",
-            [club_type],
+            "SELECT bucket_index, lower_bound, upper_bound, label FROM swing_effort_thresholds WHERE club_type = ? AND user_id = ? ORDER BY bucket_index",
+            [club_type, user_id],
         ).fetchall()
         thresholds = [{"bucket_index": r[0], "lower_bound": r[1], "upper_bound": r[2], "label": r[3]} for r in threshold_rows] or None
     except Exception:
@@ -326,6 +302,7 @@ def wedge_matrix(
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     limit_sessions: Optional[int] = None,
+    user_id: int = Depends(get_current_user_id),
 ):
     """Returns carry stats per club_type × swing_effort bucket."""
     from api.db import get_conn
@@ -337,17 +314,19 @@ def wedge_matrix(
     elif club_types:
         target_types = set(club_types.split(","))
     else:
-        existing = {r[0] for r in conn.execute("SELECT DISTINCT club_type FROM shots WHERE club_type IS NOT NULL").fetchall()}
+        existing = {r[0] for r in conn.execute(
+            "SELECT DISTINCT club_type FROM shots WHERE club_type IS NOT NULL AND user_id = ?", [user_id]
+        ).fetchall()}
         target_types = existing & default_wedges
 
-    conditions = ["s.club_type IS NOT NULL", "s.swing_effort IS NOT NULL", "s.carry_distance IS NOT NULL"]
+    conditions = ["s.club_type IS NOT NULL", "s.swing_effort IS NOT NULL", "s.carry_distance IS NOT NULL", "s.user_id = ?"]
+    params = [user_id]
     if not include_outliers:
         conditions.append("s.is_outlier = false")
     if target_types:
         placeholders = ",".join("?" * len(target_types))
         conditions.append(f"s.club_type IN ({placeholders})")
-
-    params = list(target_types)
+        params.extend(list(target_types))
     if disabled_clubs:
         pairs = [c.strip() for c in disabled_clubs.split(",") if c.strip() and "|" in c]
         if pairs:
@@ -361,7 +340,11 @@ def wedge_matrix(
         conditions.append("sess.session_date <= ?")
         params.append(date_to)
     if limit_sessions:
-        conditions.append(f"s.session_id IN (SELECT session_id FROM sessions ORDER BY session_date DESC LIMIT {limit_sessions})")
+        conditions.append(
+            "s.session_id IN (SELECT session_id FROM sessions WHERE user_id = ? "
+            f"ORDER BY session_date DESC LIMIT {limit_sessions})"
+        )
+        params.append(user_id)
 
     needs_session_join = date_from is not None or date_to is not None
     session_join = "JOIN sessions sess ON sess.session_id = s.session_id" if needs_session_join else ""
@@ -387,7 +370,7 @@ def wedge_matrix(
         FROM shots s
         {session_join}
         LEFT JOIN swing_effort_thresholds t
-            ON t.club_type = s.club_type AND CAST(t.bucket_index AS VARCHAR) = s.swing_effort
+            ON t.club_type = s.club_type AND CAST(t.bucket_index AS VARCHAR) = s.swing_effort AND t.user_id = s.user_id
         WHERE {where}
         GROUP BY s.club_type, s.club, s.swing_effort
         ORDER BY AVG(s.carry_distance) DESC NULLS LAST

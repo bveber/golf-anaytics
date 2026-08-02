@@ -7,7 +7,6 @@ We click through each filter tab to collect all sessions across all types.
 
 from __future__ import annotations
 
-import os
 import re
 from dataclasses import dataclass
 from urllib.parse import urlparse, parse_qs
@@ -29,21 +28,21 @@ class RemoteSession:
     session_type: str   # as it appears in the URL query param (e.g. "practice")
 
 
-def get_new_sessions(page: Page) -> list[RemoteSession]:
-    """Return sessions on r-cloud that are not yet in the local database."""
-    all_sessions = _scrape_all_session_types(page)
-    known_ids = _get_known_session_ids()
+def get_new_sessions(page: Page, base_url: str, user_id: int) -> list[RemoteSession]:
+    """Return sessions on r-cloud that are not yet in this user's local data."""
+    all_sessions = _scrape_all_session_types(page, base_url)
+    known_ids = _get_known_session_ids(user_id)
     return [s for s in all_sessions if s.session_id not in known_ids]
 
 
-def _get_known_session_ids() -> set[str]:
+def _get_known_session_ids(user_id: int) -> set[str]:
     conn = get_connection()
-    rows = conn.execute("SELECT session_id FROM sessions").fetchall()
+    rows = conn.execute("SELECT session_id FROM sessions WHERE user_id = ?", [user_id]).fetchall()
     return {r[0] for r in rows}
 
 
-def _scrape_all_session_types(page: Page) -> list[RemoteSession]:
-    base_url = os.environ["RCLOUD_BASE_URL"].rstrip("/")
+def _scrape_all_session_types(page: Page, base_url: str) -> list[RemoteSession]:
+    base_url = base_url.rstrip("/")
     page.goto(f"{base_url}/sessions")
     _wait(page)
 

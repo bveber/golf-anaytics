@@ -139,11 +139,20 @@ export interface MatrixRow {
   buckets: Record<string, MatrixBucket>
 }
 
+function handleAuthFailure(status: number) {
+  if (status === 401) {
+    window.location.reload()
+  }
+}
+
 async function get<T>(path: string, params?: Record<string, string>): Promise<T> {
   const url = new URL(BASE + path, window.location.origin)
   if (params) Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v))
-  const res = await fetch(url.toString())
-  if (!res.ok) throw new Error(`API error ${res.status}: ${path}`)
+  const res = await fetch(url.toString(), { credentials: 'include' })
+  if (!res.ok) {
+    handleAuthFailure(res.status)
+    throw new Error(`API error ${res.status}: ${path}`)
+  }
   return res.json()
 }
 
@@ -237,20 +246,24 @@ export const api = {
   gtIngest: (file: File) => {
     const form = new FormData()
     form.append('file', file)
-    return fetch(`${BASE}/golf-tracker/ingest`, { method: 'POST', body: form }).then((r) => r.json())
+    return fetch(`${BASE}/golf-tracker/ingest`, { method: 'POST', body: form, credentials: 'include' })
+      .then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() })
   },
   swingEffortThresholds: (disabledClubs?: string) =>
     get<SwingEffortThreshold[]>('/swing-effort/thresholds', disabledClubs ? { disabled_clubs: disabledClubs } : undefined),
   swingEffortCalibrate: () =>
-    fetch(`${BASE}/swing-effort/calibrate`, { method: 'POST' }).then((r) => r.json()),
+    fetch(`${BASE}/swing-effort/calibrate`, { method: 'POST', credentials: 'include' })
+      .then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
   swingEffortCalibrateOne: (clubType: string) =>
-    fetch(`${BASE}/swing-effort/calibrate?club_type=${encodeURIComponent(clubType)}`, { method: 'POST' }).then((r) => r.json()),
+    fetch(`${BASE}/swing-effort/calibrate?club_type=${encodeURIComponent(clubType)}`, { method: 'POST', credentials: 'include' })
+      .then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
   updateSwingEffortThresholds: (clubType: string, boundaries: number[]) =>
     fetch(`${BASE}/swing-effort/thresholds/${encodeURIComponent(clubType)}`, {
       method: 'PATCH',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ boundaries }),
-    }).then((r) => r.json()),
+    }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
   speedHistogram: (clubType: string, disabledClubs?: string) =>
     get<SpeedHistogram>(`/swing-effort/histogram/${clubType}`, disabledClubs ? { disabled_clubs: disabledClubs } : undefined),
   wedgeMatrix: (params?: Record<string, string>) => get<MatrixRow[]>('/swing-effort/matrix', params),
@@ -258,13 +271,43 @@ export const api = {
   updateSettings: (body: Partial<UserSettings>) =>
     fetch(`${BASE}/settings`, {
       method: 'PATCH',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    }).then((r) => r.json() as Promise<UserSettings>),
+    }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() as Promise<UserSettings> }),
   updateOutlier: (shotId: string, isOutlier: boolean, note?: string) =>
     fetch(`${BASE}/shots/${encodeURIComponent(shotId)}/outlier`, {
       method: 'PATCH',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ is_outlier: isOutlier, outlier_note: note ?? null }),
-    }).then((r) => r.json()),
+    }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
+  rcloudCredentialsStatus: () => get<{ configured: boolean }>('/settings/rcloud-credentials/status'),
+  setRcloudCredentials: (email: string, password: string) =>
+    fetch(`${BASE}/settings/rcloud-credentials`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }).then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
+  deleteRcloudCredentials: () =>
+    fetch(`${BASE}/settings/rcloud-credentials`, { method: 'DELETE', credentials: 'include' })
+      .then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() }),
+  triggerSync: () =>
+    fetch(`${BASE}/sync`, { method: 'POST', credentials: 'include' })
+      .then((r) => { if (!r.ok) handleAuthFailure(r.status); return r.json() as Promise<SyncJob> }),
+  getSyncJob: (jobId: number) => get<SyncJob>(`/sync/jobs/${jobId}`),
+  listSyncJobs: () => get<SyncJob[]>('/sync/jobs'),
+}
+
+export interface SyncJob {
+  job_id: number
+  user_id: number
+  status: 'queued' | 'running' | 'success' | 'failed'
+  trigger: 'manual' | 'scheduled'
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  result: string | null
+  error: string | null
 }

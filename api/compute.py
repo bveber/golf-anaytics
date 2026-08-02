@@ -21,11 +21,11 @@ def ensure_adj_columns(conn: duckdb.DuckDBPyConnection) -> None:
             pass
 
 
-def recompute_adjustments(conn: duckdb.DuckDBPyConnection) -> int:
-    """Recompute all _adj columns for all shots using current user_settings.
+def recompute_adjustments(conn: duckdb.DuckDBPyConnection, user_id: int) -> int:
+    """Recompute all _adj columns for one user's shots using their user_settings.
     Returns the number of shots updated."""
     settings = conn.execute(
-        "SELECT elevation_ft, temperature_f FROM user_settings WHERE id = 1"
+        "SELECT elevation_ft, temperature_f FROM user_settings WHERE user_id = ?", [user_id]
     ).fetchone()
     elev = settings[0] if settings else 900.0
     temp = settings[1] if settings else 70.0
@@ -40,7 +40,9 @@ def recompute_adjustments(conn: duckdb.DuckDBPyConnection) -> int:
             carry_distance,
             total_distance
         FROM shots
-        """
+        WHERE user_id = ?
+        """,
+        [user_id],
     ).fetchall()
 
     updates = []
