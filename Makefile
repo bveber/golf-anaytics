@@ -1,4 +1,4 @@
-.PHONY: setup sync sync-visible dry-run scheduler install-browsers api frontend help
+.PHONY: setup sync sync-visible dry-run install-browsers api frontend help docker-build docker-up docker-down docker-logs
 
 VENV     := .venv
 PYTHON   := $(VENV)/bin/python
@@ -7,13 +7,16 @@ PIP      := $(VENV)/bin/pip
 help:
 	@echo "Usage:"
 	@echo "  make setup         Create venv, install dependencies, install Playwright browsers"
-	@echo "  make sync          Run nightly sync (headless)"
+	@echo "  make sync          Run manual sync for user_id=1 (headless)"
 	@echo "  make sync-visible  Run sync with visible browser (useful for first-run / debugging)"
 	@echo "  make dry-run       Discover new sessions without writing to DB"
-	@echo "  make scheduler     Start the nightly scheduler daemon"
-	@echo "  make api           Run FastAPI backend (port 8000)"
+	@echo "  make api           Run FastAPI backend (port 8000) - also runs the nightly sync scheduler"
 	@echo "  make frontend      Run React frontend (port 5173)"
 	@echo "  make dev           Run API + frontend together, logs in logs/"
+	@echo "  make docker-build  Build the api + frontend containers"
+	@echo "  make docker-up     Start the app via docker compose (detached)"
+	@echo "  make docker-down   Stop the docker compose app"
+	@echo "  make docker-logs   Tail logs from both containers"
 
 debug: $(VENV)/bin/activate
 	$(PYTHON) debug_scraper.py
@@ -30,16 +33,13 @@ install-browsers: $(VENV)/bin/activate
 	$(PYTHON) -m playwright install chromium
 
 sync: $(VENV)/bin/activate
-	$(PYTHON) sync.py --headless
+	$(PYTHON) sync.py --user-id 1 --headless
 
 sync-visible: $(VENV)/bin/activate
-	$(PYTHON) sync.py --no-headless
+	$(PYTHON) sync.py --user-id 1 --no-headless
 
 dry-run: $(VENV)/bin/activate
-	$(PYTHON) sync.py --no-headless --dry-run
-
-scheduler: $(VENV)/bin/activate
-	$(PYTHON) -m scraper.scheduler
+	$(PYTHON) sync.py --user-id 1 --no-headless --dry-run
 
 api: $(VENV)/bin/activate
 	$(VENV)/bin/uvicorn api.main:app --reload --port 8000
@@ -49,3 +49,15 @@ frontend:
 
 dev: ## Run API + frontend together, tailing logs to logs/api.log and logs/frontend.log
 	@bash scripts/dev.sh
+
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up -d
+
+docker-down:
+	docker compose down
+
+docker-logs:
+	docker compose logs -f
