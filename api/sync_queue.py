@@ -18,7 +18,10 @@ from api.db import get_conn
 
 log = logging.getLogger("sync_queue")
 
-_JOB_COLS = ["job_id", "user_id", "status", "trigger", "created_at", "started_at", "finished_at", "result", "error"]
+_JOB_COLS = [
+    "job_id", "user_id", "status", "trigger", "created_at", "started_at", "finished_at",
+    "result", "error", "progress",
+]
 
 _queue: "queue.Queue[tuple[int, int]]" = queue.Queue()
 _started = False
@@ -53,9 +56,12 @@ def list_jobs_for_user(user_id: int, limit: int = 20) -> list[dict]:
 def _run_job(job_id: int, user_id: int) -> None:
     from sync import run_sync_for_user
 
+    def report_progress(message: str) -> None:
+        get_conn().execute("UPDATE sync_jobs SET progress = ? WHERE job_id = ?", [message, job_id])
+
     get_conn().execute("UPDATE sync_jobs SET status = 'running', started_at = now() WHERE job_id = ?", [job_id])
     try:
-        n = run_sync_for_user(user_id, headless=True)
+        n = run_sync_for_user(user_id, headless=True, progress_callback=report_progress)
         get_conn().execute(
             "UPDATE sync_jobs SET status = 'success', finished_at = now(), result = ? WHERE job_id = ?",
             [f"{n} new shot(s)", job_id],

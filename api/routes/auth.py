@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from api.auth import (
     SESSION_COOKIE_NAME,
@@ -12,14 +12,6 @@ from api.auth import (
 from api.db import get_conn
 
 router = APIRouter(prefix="/auth", tags=["auth"])
-
-# Every table carrying a user_id, in no particular order - used to reassign
-# a placeholder user's data to a real account on first login.
-_USER_SCOPED_TABLES = [
-    "sessions", "shots", "combine_sessions", "swing_effort_thresholds", "user_settings",
-    "gt_courses", "gt_tee_sets", "gt_holes", "gt_rounds", "gt_hole_stats",
-    "gt_shots", "gt_putts", "gt_penalties",
-]
 
 
 def _set_session_cookie(response: Response, user_id: int) -> None:
@@ -63,24 +55,6 @@ def login_with_google(body: dict, response: Response):
             [google_sub, email, display_name],
         ).fetchone()
         user_id = new_row[0]
-
-        # Claim the single migration placeholder's data (the pre-multi-tenant user's
-        # sessions/shots/etc.) if it hasn't already been claimed by someone else.
-        # We reassign every row's user_id rather than mutating the placeholder's
-        # `users` row itself/deleting it - DuckDB has had bugs (through at least
-        # 1.5.5) around UPDATE/DELETE touching PK/UNIQUE-indexed columns on a
-        # table that's the target of other tables' foreign keys. The orphaned
-        # placeholder row is harmless and intentionally left in place.
-        placeholder = conn.execute(
-            "SELECT user_id FROM users WHERE google_sub = 'MIGRATION_PLACEHOLDER'"
-        ).fetchone()
-        if placeholder:
-            placeholder_user_id = placeholder[0]
-            for table in _USER_SCOPED_TABLES:
-                conn.execute(
-                    f"UPDATE {table} SET user_id = ? WHERE user_id = ?",
-                    [user_id, placeholder_user_id],
-                )
 
     _set_session_cookie(response, user_id)
     return {"email": email, "display_name": display_name}

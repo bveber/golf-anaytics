@@ -90,5 +90,6 @@ CREATE TABLE IF NOT EXISTS sync_jobs (
     started_at  TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     result      TEXT,
-    error       TEXT
+    error       TEXT,
+    progress    TEXT                                -- latest step description, updated as the job runs
 );

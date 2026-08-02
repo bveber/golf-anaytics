@@ -316,3 +316,5 @@ def _migrate(conn: duckdb.DuckDBPyConnection) -> None:
     for col in _ADJ_COLS:
         if col not in existing:
             conn.execute(f"ALTER TABLE shots ADD COLUMN {col} DOUBLE")
+    if "progress" not in _columns(conn, "sync_jobs"):
+        conn.execute("ALTER TABLE sync_jobs ADD COLUMN progress TEXT")
