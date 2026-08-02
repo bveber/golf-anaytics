@@ -6,12 +6,19 @@
 	# Lambda pins this exact cert rather than trusting a public CA for it.
 	tls /certs/origin.crt /certs/origin.key
 
-	root * /srv
-	file_server
-	try_files {path} /index.html
-
+	# Both branches must be wrapped in handle blocks (mutually exclusive,
+	# first match wins) - a bare top-level file_server sits ahead of handle
+	# in Caddy's canonical directive order, so it intercepted every non-
+	# GET/HEAD request (including POST /api/*) before routing ever ran,
+	# rejecting them with 405 regardless of path.
 	handle /api/* {
 		uri strip_prefix /api
 		reverse_proxy api:8000
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
 	}
 }
