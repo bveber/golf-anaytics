@@ -210,6 +210,20 @@ data "aws_iam_policy_document" "github_actions_policy" {
   }
 
   statement {
+    sid    = "OriginCertParams"
+    effect = "Allow"
+    actions = [
+      "ssm:PutParameter",
+      "ssm:GetParameter",
+      "ssm:DeleteParameter",
+    ]
+    resources = [
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-cert",
+      "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-key",
+    ]
+  }
+
+  statement {
     sid       = "WakeInstanceForDeploy"
     effect    = "Allow"
     actions   = ["ec2:StartInstances", "ec2:DescribeInstances"]

@@ -19,6 +19,7 @@ resource "tls_self_signed_cert" "origin" {
     common_name = var.domain_name
   }
 
+  dns_names             = [var.domain_name]
   validity_period_hours = 87600 # 10 years
   allowed_uses          = ["key_encipherment", "digital_signature", "server_auth"]
 }
