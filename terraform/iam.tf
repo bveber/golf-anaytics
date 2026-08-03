@@ -269,13 +269,22 @@ data "aws_iam_policy_document" "github_actions_policy" {
     resources = ["*"]
   }
 
+  # The aws_s3_bucket resource family's refresh bundles many separate Get*
+  # calls (ACL, policy, CORS, logging, tagging, object-lock, replication,
+  # location, etc). If any single one gets AccessDenied, the AWS provider can
+  # misread that as "bucket doesn't exist" and propose destroying and
+  # recreating it - a false positive from missing IAM, not real drift. Grant
+  # the full read set (still scoped to just this bucket) to avoid repeating
+  # that per sub-resource.
   statement {
     sid    = "BackupsBucketConfigRefresh"
     effect = "Allow"
     actions = [
-      "s3:GetBucketVersioning",
+      "s3:GetBucket*",
       "s3:GetLifecycleConfiguration",
-      "s3:GetBucketPublicAccessBlock",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:GetAccelerateConfiguration",
     ]
     resources = [aws_s3_bucket.backups.arn]
   }
