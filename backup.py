@@ -1,8 +1,8 @@
 """
 Backup utilities: DB snapshots + per-session CSV retention.
 
-DB snapshots:  backups/db/golf_analytics_YYYY-MM-DD.duckdb  (keep last 30)
-Session CSVs:  backups/sessions/<session_id>.csv             (kept forever)
+DB snapshots:  backups/db/golf_analytics_YYYY-MM-DD.duckdb            (keep last 30 locally; mirrored to S3 db/)
+Session CSVs:  backups/sessions/user_<user_id>/<session_id>.csv       (kept forever; mirrored to S3 sessions/user_<user_id>/)
 """
 
 from __future__ import annotations
@@ -22,18 +22,23 @@ def backup_db() -> Path:
     shutil.copy2(db_path, dest)
 
     _prune_old_db_backups(backup_dir, keep=30)
-    _upload_to_s3(dest)
+    _upload_to_s3(dest, f"db/{dest.name}")
     return dest
 
 
-def _upload_to_s3(path: Path) -> None:
+def backup_session_csv(csv_path: Path, user_id: int) -> None:
+    """Mirror a downloaded session CSV to S3 under a per-user path."""
+    _upload_to_s3(csv_path, f"sessions/user_{user_id}/{csv_path.name}")
+
+
+def _upload_to_s3(path: Path, key: str) -> None:
     bucket = os.environ.get("BACKUP_S3_BUCKET")
     if not bucket:
         return
     import boto3
 
     boto3.client("s3", region_name=os.environ.get("AWS_REGION", "us-east-1")).upload_file(
-        str(path), bucket, f"db/{path.name}"
+        str(path), bucket, key
     )
 
 

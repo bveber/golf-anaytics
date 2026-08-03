@@ -43,7 +43,7 @@ def run_sync_for_user(
     from scraper.export import download_session_csv
     from ingester.parse import parse_csv
     from ingester.load import load_session
-    from backup import backup_db
+    from backup import backup_db, backup_session_csv
 
     creds = get_rcloud_credentials(user_id)
     if not creds:
@@ -78,6 +78,7 @@ def run_sync_for_user(
         for i, session in enumerate(sessions, 1):
             report(f"Downloading session {i}/{len(sessions)}: {session.session_id} ({session.session_type})")
             csv_path = download_session_csv(page, session, backup_dir, base_url, user_id)
+            backup_session_csv(csv_path, user_id)
             parsed = parse_csv(csv_path, session.session_id, session.session_date, session.session_type)
 
             if not dry_run:
