@@ -1,0 +1,71 @@
+name: Terraform plan (PR check)
+
+on:
+  pull_request:
+    paths:
+      - "terraform/**"
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terraform
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::631232331576:role/golf-analytics-github-actions
+          aws-region: us-east-1
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.5"
+
+      - name: terraform fmt check
+        run: terraform fmt -check -diff
+
+      - name: terraform init
+        run: terraform init
+
+      - name: terraform validate
+        run: terraform validate
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          terraform plan -no-color | tee plan_output.txt
+          PLAN_EXIT=${PIPESTATUS[0]}
+          set -e
+          {
+            echo "PLAN<<PLANEOF"
+            cat plan_output.txt
+            echo "PLANEOF"
+          } >> "$GITHUB_OUTPUT"
+          exit "$PLAN_EXIT"
+
+      - name: Comment plan on PR
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const plan = process.env.PLAN.slice(0, 60000)
+            const status = process.env.PLAN_OUTCOME === 'success' ? 'Terraform Plan' : 'Terraform Plan (FAILED)'
+            const body = `#### ${status}\n\`\`\`\n${plan}\n\`\`\``
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            })
+        env:
+          PLAN: ${{ steps.plan.outputs.PLAN }}
+          PLAN_OUTCOME: ${{ steps.plan.outcome }}

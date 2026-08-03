@@ -164,7 +164,13 @@ data "aws_iam_policy_document" "github_actions_assume_role" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${var.github_repo}:ref:refs/heads/main"]
+      # Pushes to main (deploy/apply workflows) plus pull_request-triggered
+      # runs (the plan-on-PR check) - pull_request's sub claim isn't tied to
+      # a specific branch or PR number, just "pull_request" itself.
+      values = [
+        "repo:${var.github_repo}:ref:refs/heads/main",
+        "repo:${var.github_repo}:pull_request",
+      ]
     }
   }
 }
@@ -216,6 +222,7 @@ data "aws_iam_policy_document" "github_actions_policy" {
       "ssm:PutParameter",
       "ssm:GetParameter",
       "ssm:DeleteParameter",
+      "ssm:ListTagsForResource",
     ]
     resources = [
       "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-cert",
@@ -247,11 +254,40 @@ data "aws_iam_policy_document" "github_actions_policy" {
       "logs:*",
       "iam:GetRole", "iam:PassRole", "iam:GetInstanceProfile",
       "iam:CreateRole", "iam:DeleteRole", "iam:PutRolePolicy", "iam:DeleteRolePolicy",
-      "iam:GetRolePolicy", "iam:GetOpenIDConnectProvider", "iam:TagRole",
+      "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:GetOpenIDConnectProvider", "iam:TagRole",
       "iam:CreatePolicy", "iam:DeletePolicy", "iam:GetPolicy", "iam:ListPolicyVersions",
       "iam:AttachRolePolicy", "iam:DetachRolePolicy", "iam:ListAttachedRolePolicies",
     ]
     resources = ["*"]
+  }
+
+  # DescribeParameters doesn't support resource-level scoping, so this can't
+  # be narrowed to the origin-cert/origin-key params like the statement above.
+  statement {
+    sid       = "SSMParameterRefresh"
+    effect    = "Allow"
+    actions   = ["ssm:DescribeParameters"]
+    resources = ["*"]
+  }
+
+  # The aws_s3_bucket resource family's refresh bundles many separate Get*
+  # calls (ACL, policy, CORS, logging, tagging, object-lock, replication,
+  # location, etc). If any single one gets AccessDenied, the AWS provider can
+  # misread that as "bucket doesn't exist" and propose destroying and
+  # recreating it - a false positive from missing IAM, not real drift. Grant
+  # the full read set (still scoped to just this bucket) to avoid repeating
+  # that per sub-resource.
+  statement {
+    sid    = "BackupsBucketConfigRefresh"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucket*",
+      "s3:GetLifecycleConfiguration",
+      "s3:GetEncryptionConfiguration",
+      "s3:GetReplicationConfiguration",
+      "s3:GetAccelerateConfiguration",
+    ]
+    resources = [aws_s3_bucket.backups.arn]
   }
 }
 
