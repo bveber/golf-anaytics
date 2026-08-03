@@ -222,6 +222,7 @@ data "aws_iam_policy_document" "github_actions_policy" {
       "ssm:PutParameter",
       "ssm:GetParameter",
       "ssm:DeleteParameter",
+      "ssm:ListTagsForResource",
     ]
     resources = [
       "arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/golf-analytics/origin-cert",
